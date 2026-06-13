@@ -150,7 +150,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             Step {msg.stepIndex}: {msg.stepName}
           </span>
         </div>
-        <p className="text-slate-600 leading-relaxed whitespace-pre-line font-sans">
+        <p className="text-slate-600 leading-relaxed whitespace-pre-line font-sans max-h-[280px] overflow-y-auto">
           <StreamTypewriter
             text={msg.content}
             active={Boolean(msg.streamActive)}
@@ -161,7 +161,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   };
 
   return (
-    <div className="border border-slate-200 rounded-xl bg-white shadow-sm overflow-hidden flex flex-col h-full text-left">
+    <div className="border border-slate-200 rounded-xl bg-white shadow-sm overflow-hidden flex flex-col h-full min-h-0 text-left">
       <div className="p-4 border-b border-slate-200 bg-white flex items-center justify-between">
         <div className="flex items-center gap-2">
           <MessageSquare className="w-4 h-4 text-orange-600" />

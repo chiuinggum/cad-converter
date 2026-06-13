@@ -8,12 +8,20 @@ import os
 import re
 import sys
 import uuid
+import base64
 import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 FRONTEND_ROOT = Path(__file__).resolve().parent
+
+
+def resolve_wondercad_root() -> Path:
+    env = os.environ.get("WONDERCAD_ROOT")
+    if env:
+        return Path(env).resolve()
+    return FRONTEND_ROOT.parent.resolve()
 
 
 def resolve_procad_root() -> Path:
@@ -34,14 +42,19 @@ def resolve_procad_root() -> Path:
 
 
 PROCAD_ROOT = resolve_procad_root()
+WONDERCAD_ROOT = resolve_wondercad_root()
+DRAWING_AGENT_SRC = WONDERCAD_ROOT / "src"
 SESSIONS_ROOT = FRONTEND_ROOT / ".sessions"
 CODER_LOCAL = PROCAD_ROOT / "models" / "ProCAD-coder"
 
 os.chdir(str(PROCAD_ROOT))
 sys.path.insert(0, str(PROCAD_ROOT))
+if DRAWING_AGENT_SRC.is_dir():
+    sys.path.insert(0, str(DRAWING_AGENT_SRC))
 
 from dotenv import load_dotenv
 
+load_dotenv(WONDERCAD_ROOT / ".env")
 load_dotenv(PROCAD_ROOT / ".env")
 load_dotenv(FRONTEND_ROOT / ".env")
 
@@ -54,9 +67,10 @@ from src.ask_agent import AskAgent
 from src.inference import LLM
 from src.mesh_utils import cadquery_to_mesh
 
-CLARIFY_MODEL = os.environ.get("CLARIFY_AGENT_MODEL", "gemini-3.5-flash")
-ANSWER_MODEL = os.environ.get("ANSWER_MODEL", "gemini-3.5-flash")
-CODE_MODEL = os.environ.get("CODE_GEN_MODEL", "gemini-3.5-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+CLARIFY_MODEL = os.environ.get("CLARIFY_AGENT_MODEL", GEMINI_MODEL)
+ANSWER_MODEL = os.environ.get("ANSWER_MODEL", GEMINI_MODEL)
+CODE_MODEL = os.environ.get("CODE_GEN_MODEL", GEMINI_MODEL)
 
 USER_ANSWER_TEMPLATE = """You are the user who submitted this CAD design request.
 
@@ -129,7 +143,11 @@ def save_session(session_id: str, data: Dict[str, Any]) -> None:
 
 
 def enrich_prompt_with_image(
-    prompt: str, image_b64: Optional[str], mime_type: Optional[str], llm: LLM
+    prompt: str,
+    image_b64: Optional[str],
+    mime_type: Optional[str],
+    llm: LLM,
+    drawing_spec: Optional[Dict[str, Any]] = None,
 ) -> str:
     if not image_b64:
         return prompt
@@ -137,25 +155,36 @@ def enrich_prompt_with_image(
     raw = image_b64.split("base64,")[-1] if "base64," in image_b64 else image_b64
     mime = mime_type or "image/png"
 
+    spec_block = ""
+    if drawing_spec:
+        spec_block = (
+            "\n\nStructured drawing spec (pre-extracted from the image):\n"
+            + json.dumps(drawing_spec, indent=2, ensure_ascii=False)
+        )
+
     vision_prompt = (
         "Analyze this mechanical engineering drawing or reference image. "
         "Extract dimensions, features, and geometry needed for CAD modeling. "
         "Combine with the user's text prompt into one precise CAD build description. "
-        "Output plain text only, no markdown.\n\nUser text:\n" + prompt
+        "Use the structured drawing spec when provided. "
+        "Output plain text only, no markdown.\n\nUser text:\n"
+        + prompt
+        + spec_block
     )
 
     try:
         from google import genai
         from google.genai import types
 
-        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY", ""))
+        api_key = os.environ.get("GEMINI_API_KEY", "")
+        client = genai.Client(api_key=api_key)
         response = client.models.generate_content(
-            model="gemini-3.5-flash",
+            model=GEMINI_MODEL,
             contents=[
                 types.Content(
                     role="user",
                     parts=[
-                        types.Part.from_bytes(data=__import__("base64").b64decode(raw), mime_type=mime),
+                        types.Part.from_bytes(data=base64.b64decode(raw), mime_type=mime),
                         types.Part.from_text(text=vision_prompt),
                     ],
                 )
@@ -172,10 +201,108 @@ def enrich_prompt_with_image(
         {
             "role": "user",
             "content": f"The user uploaded a technical drawing with this text prompt:\n{prompt}\n"
-            "Expand into a detailed CAD description assuming standard mechanical drawing conventions.",
+            + (spec_block or "")
+            + "\nExpand into a detailed CAD description assuming standard mechanical drawing conventions.",
         }
     ]
     return llm.inference(messages=messages)
+
+
+def extract_drawing_spec_from_image(
+    image_b64: Optional[str],
+    mime_type: Optional[str],
+    out_dir: Path,
+) -> Optional[Dict[str, Any]]:
+    if not image_b64:
+        return None
+
+    from drawing_agent.extractor import extract_drawing
+
+    raw = image_b64.split("base64,")[-1] if "base64," in image_b64 else image_b64
+    mime = mime_type or "image/png"
+    ext = ".jpg" if "jpeg" in mime or "jpg" in mime else ".png"
+    img_path = out_dir / f"reference_drawing{ext}"
+    img_path.write_bytes(base64.b64decode(raw))
+
+    spec = extract_drawing(img_path, model=GEMINI_MODEL)
+    return json.loads(spec.model_dump_json())
+
+
+def append_drawing_spec_context(text: str, drawing_spec: Optional[Dict[str, Any]]) -> str:
+    if not drawing_spec:
+        return text
+    return (
+        text
+        + "\n\nSTRUCTURED DRAWING SPEC JSON:\n"
+        + json.dumps(drawing_spec, indent=2, ensure_ascii=False)
+    )
+
+
+def format_drawing_spec_log(spec: Dict[str, Any]) -> str:
+    lines = ["[Drawing Agent] Structured DrawingSpec extraction complete."]
+    if spec.get("part_name"):
+        lines.append(f"[Drawing Agent] Part name: {spec['part_name']}")
+    if spec.get("drawing_number"):
+        lines.append(f"[Drawing Agent] Drawing number: {spec['drawing_number']}")
+    unit = spec.get("default_unit")
+    if unit:
+        lines.append(f"[Drawing Agent] Default unit: {unit}")
+
+    views = spec.get("views") or []
+    if views:
+        lines.append(f"[Drawing Agent] Views ({len(views)}):")
+        for view in views[:6]:
+            label = view.get("label") or view.get("view_type") or view.get("id")
+            lines.append(f"  · {label}: {view.get('description', '')[:120]}")
+        if len(views) > 6:
+            lines.append(f"  … +{len(views) - 6} more views")
+
+    dimensions = spec.get("dimensions") or []
+    if dimensions:
+        lines.append(f"[Drawing Agent] Dimensions ({len(dimensions)}):")
+        for dim in dimensions[:15]:
+            val = dim.get("value")
+            val_str = str(val) if val is not None else "limit/unknown"
+            lines.append(
+                f"  · {dim.get('id')}: {val_str} {dim.get('unit', '')} "
+                f"→ {dim.get('applies_to', '')[:80]}"
+            )
+        if len(dimensions) > 15:
+            lines.append(f"  … +{len(dimensions) - 15} more dimensions")
+
+    features = spec.get("features") or []
+    if features:
+        lines.append(f"[Drawing Agent] Features ({len(features)}):")
+        for feat in features[:8]:
+            lines.append(
+                f"  · {feat.get('feature_type')}: {feat.get('description', '')[:100]}"
+            )
+        if len(features) > 8:
+            lines.append(f"  … +{len(features) - 8} more features")
+
+    ambiguities = spec.get("ambiguities") or []
+    if ambiguities:
+        lines.append(f"[Drawing Agent] Ambiguities flagged ({len(ambiguities)}):")
+        for amb in ambiguities[:5]:
+            lines.append(f"  ? {amb.get('question') or amb.get('description', '')[:100]}")
+
+    notes = spec.get("general_notes") or []
+    if notes:
+        lines.append(f"[Drawing Agent] Notes ({len(notes)}):")
+        for note in notes[:4]:
+            lines.append(f"  · {note[:120]}")
+
+    return "\n".join(lines)
+def format_drawing_spec_extra(drawing_spec: Optional[Dict[str, Any]]) -> str:
+    if not drawing_spec:
+        return ""
+    dim_n = len(drawing_spec.get("dimensions") or [])
+    feat_n = len(drawing_spec.get("features") or [])
+    amb_n = len(drawing_spec.get("ambiguities") or [])
+    return (
+        f"Structured drawing spec available ({dim_n} dimensions, "
+        f"{feat_n} features, {amb_n} ambiguities)."
+    )
 
 
 def answer_questions(
@@ -327,18 +454,32 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
     session_id = data.get("sessionId") or str(uuid.uuid4())
     out_dir = session_dir(session_id)
     iterations: List[Dict[str, Any]] = []
+    has_image = bool(data.get("image"))
+    drawing_spec: Optional[Dict[str, Any]] = None
+
+    pipeline_steps: List[str] = []
+    if has_image:
+        pipeline_steps.append("Drawing Spec Extract")
+    pipeline_steps.extend(
+        [
+            "Vision & Prompt Merge",
+            "Clarifier",
+            "Coder",
+            "Sandbox Export",
+        ]
+    )
+
+    step_vision = 2 if has_image else 1
+    step_clarify = step_vision + 1
+    step_coder = step_clarify + 1
+    step_sandbox = step_coder + 1
 
     _pipeline_emit(
         emit,
         {
             "type": "pipeline_start",
-            "message": "Starting Pro-CAD pipeline: clarify → CadQuery codegen → 3D export",
-            "steps": [
-                "Vision & Prompt Merge",
-                "Clarifier",
-                "Coder",
-                "Sandbox Export",
-            ],
+            "message": "Starting agent pipeline: drawing analysis → clarify → CadQuery → 3D export",
+            "steps": pipeline_steps,
         },
     )
 
@@ -346,24 +487,107 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
     answer_llm = LLM(model_name=ANSWER_MODEL)
     code_llm = LLM(model_name=CODE_MODEL)
 
+    if has_image:
+        _pipeline_emit(
+            emit,
+            {
+                "type": "step_start",
+                "step": 1,
+                "stepName": "Drawing Spec Extract",
+                "message": "Initializing drawing agent — loading reference image and Gemini structured schema…",
+            },
+        )
+        _pipeline_emit(
+            emit,
+            {
+                "type": "step_progress",
+                "step": 1,
+                "stepName": "Drawing Spec Extract",
+                "message": f"Calling {GEMINI_MODEL} with high-resolution vision to extract DrawingSpec JSON…",
+            },
+        )
+        try:
+            drawing_spec = extract_drawing_spec_from_image(
+                data.get("image"),
+                data.get("imageType"),
+                out_dir,
+            )
+            spec_logs = format_drawing_spec_log(drawing_spec or {})
+            iter_spec = make_iteration(
+                1,
+                "Drawing Spec Extract",
+                "success",
+                spec_logs,
+                "",
+            )
+            iterations.append(iter_spec)
+            dim_n = len((drawing_spec or {}).get("dimensions") or [])
+            feat_n = len((drawing_spec or {}).get("features") or [])
+            _pipeline_emit(
+                emit,
+                {
+                    "type": "step_done",
+                    "step": 1,
+                    "iteration": iter_spec,
+                    "message": f"Drawing spec ready — {dim_n} dimensions, {feat_n} features captured.",
+                    "drawingSpec": drawing_spec,
+                },
+            )
+        except Exception as exc:
+            err = str(exc)
+            iter_spec_fail = make_iteration(
+                1,
+                "Drawing Spec Extract",
+                "exec_error",
+                f"[Drawing Agent] Extraction failed: {err}\n[Drawing Agent] Pipeline will continue with vision-only analysis.",
+                "",
+            )
+            iterations.append(iter_spec_fail)
+            _pipeline_emit(
+                emit,
+                {
+                    "type": "step_done",
+                    "step": 1,
+                    "iteration": iter_spec_fail,
+                    "message": f"Drawing spec extraction failed — continuing with vision merge. ({err})",
+                },
+            )
+
     _pipeline_emit(
         emit,
         {
             "type": "step_start",
-            "step": 1,
+            "step": step_vision,
             "stepName": "Vision & Prompt Merge",
-            "message": "Reading your text description and analyzing the reference drawing (if any)…",
+            "message": "Merging user prompt with drawing context and vision analysis…",
+        },
+    )
+    _pipeline_emit(
+        emit,
+        {
+            "type": "step_progress",
+            "step": step_vision,
+            "stepName": "Vision & Prompt Merge",
+            "message": "Running multimodal merge — combining text prompt, image, and structured spec…",
         },
     )
     merged_prompt = enrich_prompt_with_image(
-        prompt, data.get("image"), data.get("imageType"), clarify_llm
+        prompt,
+        data.get("image"),
+        data.get("imageType"),
+        clarify_llm,
+        drawing_spec,
     )
 
     iter1 = make_iteration(
-        1,
+        step_vision,
         "Vision & Prompt Merge",
         "success",
-        f"[Input] User prompt received.\n[Vision] Merged description length: {len(merged_prompt)} chars.",
+        f"[Input] User prompt: {len(prompt)} chars.\n[Vision] Merged CAD description: {len(merged_prompt)} chars."
+        + (f"\n{format_drawing_spec_extra(drawing_spec)}" if drawing_spec else "")
+        + "\n[Vision] Preview:\n"
+        + merged_prompt[:600]
+        + ("…" if len(merged_prompt) > 600 else ""),
         "",
     )
     iterations.append(iter1)
@@ -371,7 +595,7 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
         emit,
         {
             "type": "step_done",
-            "step": 1,
+            "step": step_vision,
             "iteration": iter1,
             "message": f"Prompt merge complete ({len(merged_prompt)} characters).",
         },
@@ -381,7 +605,7 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
         emit,
         {
             "type": "step_start",
-            "step": 2,
+            "step": step_clarify,
             "stepName": "Clarifier",
             "message": "Clarifier is checking for ambiguity, conflicts, and missing dimensions…",
         },
@@ -399,13 +623,13 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
             emit,
             {
                 "type": "step_progress",
-                "step": 2,
+                "step": step_clarify,
                 "message": f"Ambiguity detected — {len(questions)} clarification question(s):\n{q_preview}",
             },
         )
         iterations.append(
             make_iteration(
-                2,
+                step_clarify,
                 "Clarifier — Ambiguity Detected",
                 "running",
                 "[Clarifier] Prompt is misleading/ambiguous.\n"
@@ -413,14 +637,14 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
                 "",
             )
         )
-        extra = ""
-        if data.get("image"):
+        extra = format_drawing_spec_extra(drawing_spec)
+        if data.get("image") and not extra:
             extra = "User also provided a reference drawing image."
         _pipeline_emit(
             emit,
             {
                 "type": "step_progress",
-                "step": 2,
+                "step": step_clarify,
                 "message": "Gemini is simulating user answers to clarification questions…",
             },
         )
@@ -429,7 +653,7 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
             emit,
             {
                 "type": "step_progress",
-                "step": 2,
+                "step": step_clarify,
                 "message": "Generating corrected CAD description from Q&A…",
             },
         )
@@ -441,7 +665,7 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
             emit,
             {
                 "type": "step_done",
-                "step": 2,
+                "step": step_clarify,
                 "iteration": iter2,
                 "message": f"Clarification complete — answered {len(answers)} question(s) and produced a standardized description.",
                 "questions": questions,
@@ -451,7 +675,7 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
     elif analysis.get("standardized_prompt"):
         clarified = analysis.get("standardized_prompt")
         iter2 = make_iteration(
-            2,
+            step_clarify,
             "Clarifier — Prompt Accepted",
             "success",
             "[Clarifier] Prompt is clear. Proceeding to code generation.",
@@ -462,14 +686,14 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
             emit,
             {
                 "type": "step_done",
-                "step": 2,
+                "step": step_clarify,
                 "iteration": iter2,
                 "message": "Description is clear — proceeding directly to code generation.",
             },
         )
     else:
         iter2 = make_iteration(
-            2,
+            step_clarify,
             "Clarifier — Prompt Accepted",
             "success",
             "[Clarifier] No clarification needed.",
@@ -480,7 +704,7 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
             emit,
             {
                 "type": "step_done",
-                "step": 2,
+                "step": step_clarify,
                 "iteration": iter2,
                 "message": "Description accepted — skipping clarification.",
             },
@@ -488,22 +712,32 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
 
     code = ""
     exec_error = None
+    codegen_input = append_drawing_spec_context(clarified, drawing_spec)
     _pipeline_emit(
         emit,
         {
             "type": "step_start",
-            "step": 3,
+            "step": step_coder,
             "stepName": "Coder — CadQuery Generation",
             "message": f"Coder ({CODE_MODEL}) is generating CadQuery code from the description…",
         },
     )
+    _pipeline_emit(
+        emit,
+        {
+            "type": "step_progress",
+            "step": step_coder,
+            "stepName": "Coder — CadQuery Generation",
+            "message": f"Invoking {CODE_MODEL} with clarified description and drawing spec context…",
+        },
+    )
     try:
-        code = generate_code(clarified, code_llm)
+        code = generate_code(codegen_input, code_llm)
         iter3 = make_iteration(
-            3,
+            step_coder,
             "Coder — CadQuery Generation",
             "success",
-            f"[Coder] Model: {CODE_MODEL}\n[Coder] Generated {len(code)} chars of CadQuery code.",
+            f"[Coder] Model: {CODE_MODEL}\n[Coder] Input description: {len(codegen_input)} chars.\n[Coder] Generated {len(code)} chars of CadQuery.\n[Coder] Preview:\n{code[:500]}{'…' if len(code) > 500 else ''}",
             code,
         )
         iterations.append(iter3)
@@ -511,7 +745,7 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
             emit,
             {
                 "type": "step_done",
-                "step": 3,
+                "step": step_coder,
                 "iteration": iter3,
                 "message": f"CadQuery code generated ({len(code)} characters).",
             },
@@ -520,7 +754,7 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
             emit,
             {
                 "type": "step_start",
-                "step": 4,
+                "step": step_sandbox,
                 "stepName": "Sandbox — Execute & Export",
                 "message": "Executing CadQuery and exporting STL / GLB / STEP…",
             },
@@ -528,7 +762,7 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
         assets = export_assets(code, out_dir)
         code = assets["prepared_code"]
         iter4 = make_iteration(
-            4,
+            step_sandbox,
             "Sandbox — Execute & Export",
             "success",
             "[Sandbox] CadQuery executed successfully.\n[Exporter] STL, GLB, STEP exported.",
@@ -539,7 +773,7 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
             emit,
             {
                 "type": "step_done",
-                "step": 4,
+                "step": step_sandbox,
                 "iteration": iter4,
                 "message": "3D model executed successfully — downloadable files exported.",
             },
@@ -547,7 +781,7 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
     except Exception as e:
         exec_error = str(e)
         iter_fail = make_iteration(
-            3,
+            step_coder,
             "Coder — CadQuery Generation",
             "exec_error",
             f"[Coder] Initial codegen or execution failed: {exec_error}",
@@ -558,7 +792,7 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
             emit,
             {
                 "type": "step_done",
-                "step": 3,
+                "step": step_coder,
                 "iteration": iter_fail,
                 "message": f"Code generation or execution failed: {exec_error}",
             },
@@ -568,7 +802,7 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
                 emit,
                 {
                     "type": "step_start",
-                    "step": 4,
+                    "step": step_sandbox,
                     "stepName": "Repair — Code Fix",
                     "message": "Repair Agent is attempting to fix the CadQuery code…",
                 },
@@ -578,7 +812,7 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
                 assets = export_assets(code, out_dir)
                 code = assets["prepared_code"]
                 iter4 = make_iteration(
-                    4,
+                    step_sandbox,
                     "Repair — Code Fix & Export",
                     "success",
                     f"[Repair] Fixed execution error.\n[Exporter] STL, GLB, STEP exported.",
@@ -590,7 +824,7 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
                     emit,
                     {
                         "type": "step_done",
-                        "step": 4,
+                        "step": step_sandbox,
                         "iteration": iter4,
                         "message": "Auto-repair succeeded — model re-exported.",
                     },
@@ -598,7 +832,7 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
             except Exception as e2:
                 exec_error = str(e2)
                 iter4_fail = make_iteration(
-                    4,
+                    step_sandbox,
                     "Repair — Failed",
                     "exec_error",
                     f"[Repair] Could not fix model: {exec_error}\n{traceback.format_exc()}",
@@ -609,7 +843,7 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
                     emit,
                     {
                         "type": "step_done",
-                        "step": 4,
+                        "step": step_sandbox,
                         "iteration": iter4_fail,
                         "message": f"Auto-repair failed: {exec_error}",
                     },
@@ -620,6 +854,7 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
         "prompt": prompt,
         "mergedPrompt": merged_prompt,
         "clarifiedPrompt": clarified,
+        "drawingSpec": drawing_spec,
         "questions": questions,
         "answers": answers,
         "isMisleading": is_misleading,
@@ -635,6 +870,7 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
         "success": success,
         "sessionId": session_id,
         "clarifiedPrompt": clarified,
+        "drawingSpec": drawing_spec,
         "questions": questions,
         "answers": answers,
         "isMisleading": is_misleading,
@@ -661,6 +897,7 @@ def run_chat(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
 
     current_code = session.get("code") or ""
     description = session.get("clarifiedPrompt") or session.get("mergedPrompt") or ""
+    description = append_drawing_spec_context(description, session.get("drawingSpec"))
 
     _pipeline_emit(
         emit,

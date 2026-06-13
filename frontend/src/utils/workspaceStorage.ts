@@ -1,6 +1,7 @@
 import { ChatMessage } from "../components/ChatPanel";
 import { PipelineIteration } from "../types";
 import { CadParam } from "./cadParams";
+import { DrawingSpecData } from "../components/DrawingSpecPanel";
 
 export interface ExampleWorkspace {
   exampleId: string;
@@ -14,6 +15,7 @@ export interface ExampleWorkspace {
   pyUrl: string | null;
   cadCode: string | null;
   cadParams: CadParam[];
+  drawingSpec: DrawingSpecData | null;
   iterations: PipelineIteration[];
   activeIterationIndex: number;
 }

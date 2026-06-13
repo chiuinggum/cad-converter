@@ -22,6 +22,8 @@ mkdir -p "$RUN_DIR"
 rsync -a --delete --exclude node_modules --exclude .sessions "$SRC_DIR/" "$RUN_DIR/"
 if [[ -f "$SRC_DIR/.env" ]]; then
   cp "$SRC_DIR/.env" "$RUN_DIR/.env"
+elif [[ -f "$WONDERCAD_ROOT/.env" ]]; then
+  cp "$WONDERCAD_ROOT/.env" "$RUN_DIR/.env"
 elif [[ -f "$WONDERCAD_ROOT/src/Pro-CAD/.env" ]]; then
   cp "$WONDERCAD_ROOT/src/Pro-CAD/.env" "$RUN_DIR/.env"
 fi
@@ -44,7 +46,7 @@ sleep +2
 echo "Starting server on port $PORT (PROCAD_ROOT=$PROCAD_ROOT) ..."
 cd "$RUN_DIR"
 : > "$LOG"
-NODE_ENV=production PROCAD_ROOT="$PROCAD_ROOT" nohup ./node_modules/.bin/tsx server.ts >> "$LOG" 2>&1 &
+NODE_ENV=production PROCAD_ROOT="$PROCAD_ROOT" WONDERCAD_ROOT="$WONDERCAD_ROOT" nohup ./node_modules/.bin/tsx server.ts >> "$LOG" 2>&1 &
 sleep 4
 curl -sf "http://127.0.0.1:$PORT/api/health" && echo ""
 STREAM_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/procad/generate/stream" \

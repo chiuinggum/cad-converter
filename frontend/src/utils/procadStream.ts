@@ -10,6 +10,7 @@ export type ProcadStreamEvent = {
   steps?: string[];
   questions?: string[];
   answers?: string[];
+  drawingSpec?: Record<string, unknown>;
 };
 
 export async function consumeProcadStream(

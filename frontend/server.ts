@@ -7,13 +7,15 @@ import dotenv from "dotenv";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
 
-dotenv.config();
-
 const FRONTEND_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const WONDERCAD_ROOT = process.env.WONDERCAD_ROOT
   ? path.resolve(process.env.WONDERCAD_ROOT)
   : path.resolve(FRONTEND_ROOT, "..");
 const EXAMPLE_ROOT = path.join(WONDERCAD_ROOT, "example");
+const DRAWING_AGENT_SRC = path.join(WONDERCAD_ROOT, "src");
+
+dotenv.config({ path: path.join(WONDERCAD_ROOT, ".env") });
+dotenv.config({ path: path.join(FRONTEND_ROOT, ".env") });
 
 function resolveProcadRoot(): string {
   const candidates = [
@@ -47,7 +49,8 @@ function callProcadService(
       env: {
         ...process.env,
         PROCAD_ROOT,
-        PYTHONPATH: PROCAD_ROOT,
+        WONDERCAD_ROOT,
+        PYTHONPATH: [PROCAD_ROOT, DRAWING_AGENT_SRC].join(path.delimiter),
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -85,7 +88,8 @@ function streamProcadService(
     env: {
       ...process.env,
       PROCAD_ROOT,
-      PYTHONPATH: PROCAD_ROOT,
+      WONDERCAD_ROOT,
+      PYTHONPATH: [PROCAD_ROOT, DRAWING_AGENT_SRC].join(path.delimiter),
     },
     stdio: ["pipe", "pipe", "pipe"],
   });

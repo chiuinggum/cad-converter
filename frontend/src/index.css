@@ -1,5 +1,12 @@
 @import "tailwindcss";
 
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+}
+
 @keyframes pipeline-shimmer-keyframes {
   0% { background-position: 200% 0; }
   100% { background-position: -200% 0; }

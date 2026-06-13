@@ -21,7 +21,6 @@ export const DrawingExplorer: React.FC<DrawingExplorerProps> = ({
   isPerceiving,
   isPipelineRunning,
   pipelineStatusLabel,
-  spec,
   promptText,
   onPromptChange,
 }) => {
@@ -97,7 +96,7 @@ export const DrawingExplorer: React.FC<DrawingExplorerProps> = ({
         </div>
       </div>
 
-      <div className="p-3 flex-1 flex flex-col gap-3 overflow-y-auto min-h-0">
+      <div className="p-3 flex-1 flex flex-col gap-2 min-h-0 overflow-hidden">
         <div className="flex flex-col gap-2 shrink-0">
           <label className="text-[11px] font-mono uppercase text-slate-400 tracking-wider font-semibold">
             CAD Prompt
@@ -106,7 +105,7 @@ export const DrawingExplorer: React.FC<DrawingExplorerProps> = ({
             value={promptText}
             onChange={(e) => onPromptChange(e.target.value)}
             placeholder="Describe the 3D part: dimensions, features, extrusion direction..."
-            className="w-full min-h-[72px] text-xs font-sans p-3 rounded-lg border border-slate-200 bg-slate-50 focus:bg-white focus:border-orange-400 focus:ring-1 focus:ring-orange-200 outline-none resize-y"
+            className="w-full h-[72px] text-xs font-sans p-3 rounded-lg border border-slate-200 bg-slate-50 focus:bg-white focus:border-orange-400 focus:ring-1 focus:ring-orange-200 outline-none resize-none"
           />
           <button
             type="button"
@@ -146,7 +145,7 @@ export const DrawingExplorer: React.FC<DrawingExplorerProps> = ({
               </span>
             )}
           </div>
-          <div className="flex-1 min-h-[160px] max-h-[280px] bg-white rounded-lg overflow-hidden flex items-center justify-center p-2 border border-slate-200 shadow-sm relative">
+          <div className="flex-1 min-h-0 bg-white rounded-lg overflow-hidden flex items-center justify-center p-2 border border-slate-200 shadow-sm relative">
             {displayPreview ? (
               <img
                 src={displayPreview}

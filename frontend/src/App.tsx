@@ -8,6 +8,7 @@ import { SpecManifest, PipelineIteration, ComparisonResult } from "./types";
 import { consumeProcadStream, ProcadStreamEvent } from "./utils/procadStream";
 import { DRAWING_EXAMPLES, resolveAllExamples, resolveExample } from "./data/examples";
 import { SpecPanel } from "./components/SpecPanel";
+import { DrawingSpecPanel, DrawingSpecData } from "./components/DrawingSpecPanel";
 import { DashboardLibrary, BatchProgress } from "./components/DashboardLibrary";
 import { extractCadParams, applyCadParamValue } from "./utils/cadParams";
 import { mimeFromAssetPath } from "./utils/exampleAssets";
@@ -63,6 +64,7 @@ export default function App() {
   const [pipelineStatusLabel, setPipelineStatusLabel] = useState<string>("");
   const [cadCode, setCadCode] = useState<string | null>(null);
   const [cadParams, setCadParams] = useState<ReturnType<typeof extractCadParams>>([]);
+  const [drawingSpec, setDrawingSpec] = useState<DrawingSpecData | null>(null);
   const [isReexecuting, setIsReexecuting] = useState(false);
 
   const resolvedExamples = resolveAllExamples(exampleLibrary.pathOverrides);
@@ -99,6 +101,7 @@ export default function App() {
       pyUrl,
       cadCode,
       cadParams,
+      drawingSpec,
       iterations,
       activeIterationIndex,
     }),
@@ -114,6 +117,7 @@ export default function App() {
       pyUrl,
       cadCode,
       cadParams,
+      drawingSpec,
       iterations,
       activeIterationIndex,
     ]
@@ -142,6 +146,7 @@ export default function App() {
     setPyUrl(ws.pyUrl);
     setCadCode(ws.cadCode);
     setCadParams(ws.cadParams || []);
+    setDrawingSpec(ws.drawingSpec ?? null);
     setIterations(ws.iterations || []);
     setActiveIterationIndex(ws.activeIterationIndex || 0);
   };
@@ -196,6 +201,7 @@ export default function App() {
     setPyUrl(null);
     setCadCode(null);
     setCadParams([]);
+    setDrawingSpec(null);
     setChatHistory([]);
 
     let preview: string | null = null;
@@ -250,6 +256,9 @@ export default function App() {
       setCadCode(code);
       setCadParams(extractCadParams(code));
     }
+    if (data.drawingSpec) {
+      setDrawingSpec(data.drawingSpec as DrawingSpecData);
+    }
   };
 
   const handleProcadStreamEvent = (event: ProcadStreamEvent) => {
@@ -282,9 +291,12 @@ export default function App() {
 
     if (event.type === "step_progress" && event.step) {
       setPipelineStatusLabel(event.message || "");
+      const progressIter = event.iteration as unknown as PipelineIteration | undefined;
+      const progressText =
+        progressIter?.logs || event.message || "";
       upsertChatMessage(`pipeline-step-${runId}-${event.step}`, {
         role: "assistant",
-        content: event.message || "",
+        content: progressText,
         kind: "pipeline_step",
         stepIndex: event.step,
         stepName: event.stepName || `Step ${event.step}`,
@@ -297,9 +309,14 @@ export default function App() {
     if (event.type === "step_done" && event.step) {
       const iteration = event.iteration as unknown as PipelineIteration | undefined;
       const status = iteration?.status === "success" ? "success" : "error";
+      const doneText =
+        iteration?.logs || event.message || "";
+      if (event.drawingSpec) {
+        setDrawingSpec(event.drawingSpec as DrawingSpecData);
+      }
       upsertChatMessage(`pipeline-step-${runId}-${event.step}`, {
         role: "assistant",
-        content: event.message || "",
+        content: doneText,
         kind: "pipeline_step",
         stepIndex: event.step,
         stepName: event.stepName || iteration?.stepName || `Step ${event.step}`,
@@ -386,7 +403,13 @@ export default function App() {
       role: "assistant",
       content: "Generating via standard API (stream unavailable, fallback mode)…",
       kind: "pipeline_header",
-      pipelineSteps: ["Vision", "Clarifier", "Coder", "Export"],
+      pipelineSteps: [
+        "Drawing Spec Extract",
+        "Vision & Prompt Merge",
+        "Clarifier",
+        "Coder",
+        "Sandbox Export",
+      ],
     });
     setPipelineStatusLabel("Generating (fallback mode)…");
 
@@ -449,6 +472,7 @@ export default function App() {
     setPipelineActiveStep(1);
     setPipelineStatusLabel("Starting pipeline…");
     setChatHistory([]);
+    setDrawingSpec(null);
     appendChatMessage("user", prompt, image);
 
     try {
@@ -725,10 +749,10 @@ export default function App() {
   const reconstructRightResize = useResizeWidth(320, 260, 520);
 
   return (
-    <div className="min-h-screen bg-[#f8fafc] text-slate-700 flex font-sans select-none antialiased">
+    <div className="h-screen overflow-hidden bg-[#f8fafc] text-slate-700 flex font-sans select-none antialiased">
       
-      <div className="flex shrink-0" style={{ width: navResize.width }}>
-        <aside className="w-full bg-white border-r border-slate-200 flex flex-col min-h-screen">
+      <div className="flex shrink-0 h-full" style={{ width: navResize.width }}>
+        <aside className="w-full bg-white border-r border-slate-200 flex flex-col h-full min-h-0">
         {/* Brand header */}
         <div className="p-4 border-b border-slate-205 flex items-center gap-3">
           <CADConverterLogo />
@@ -785,7 +809,7 @@ export default function App() {
       </div>
 
       {/* RIGHT MAIN SECTION CONTENT CONTAINER */}
-      <div className="flex-1 flex flex-col overflow-hidden min-h-screen">
+      <div className="flex-1 flex flex-col overflow-hidden min-h-0">
         
         {/* VIEW 1: PROJECTS & RUNS HISTORY LISTING - Matches uploaded screenshot exactly! */}
         {activeView === "dashboard" && (
@@ -1069,8 +1093,8 @@ export default function App() {
 
               <ResizeHandle onMouseDown={reconstructLeftResize.startResize("right")} />
 
-              <div className="flex-1 min-w-0 flex flex-col gap-3 overflow-hidden min-h-0 px-3">
-                <div className="h-[min(40vh,360px)] shrink-0 min-h-[240px]">
+              <div className="flex-1 min-w-0 flex flex-col gap-2 overflow-hidden min-h-0 px-3">
+                <div className="flex-[5] min-h-0 flex flex-col">
                   {glbUrl ? (
                     <GLBViewer
                       glbUrl={glbUrl}
@@ -1084,7 +1108,7 @@ export default function App() {
                       onParameterChange={handleParameterChange}
                     />
                   ) : (
-                    <div className="border border-slate-200 rounded-xl bg-white shadow-sm flex flex-col items-center justify-center p-8 text-center h-full">
+                    <div className="border border-slate-200 rounded-xl bg-white shadow-sm flex flex-col items-center justify-center p-8 text-center h-full min-h-0">
                       <Laptop className="w-12 h-12 text-slate-400 mb-2" />
                       <span className="text-sm font-semibold text-slate-700">3D VIEWPORT READY</span>
                       <span className="text-xs text-slate-500 mt-1 max-w-sm">
@@ -1094,10 +1118,9 @@ export default function App() {
                   )}
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 flex-1 min-h-0">
+                <div className="flex-[4] min-h-0 grid grid-cols-1 md:grid-cols-2 gap-2">
                   
-                  {/* Pipeline Console logs */}
-                  <div className="overflow-hidden h-full">
+                  <div className="min-h-0 flex flex-col overflow-hidden">
                     <LoopConsole
                       iterations={iterations}
                       isPipelineRunning={isPipelineRunning}
@@ -1114,13 +1137,19 @@ export default function App() {
                     />
                   </div>
 
-                  {/* CAD spec parameters */}
-                  <div className="overflow-hidden h-full">
-                    <SpecPanel
-                      params={cadParams}
-                      onParamChange={handleCadParamChange}
-                      isUpdating={isReexecuting}
-                    />
+                  <div className="min-h-0 flex flex-col overflow-hidden gap-2">
+                    {drawingSpec && (
+                      <div className={cadParams.length > 0 ? "flex-[3] min-h-0" : "flex-1 min-h-0"}>
+                        <DrawingSpecPanel spec={drawingSpec} />
+                      </div>
+                    )}
+                    <div className={drawingSpec && cadParams.length > 0 ? "flex-[2] min-h-0" : "flex-1 min-h-0"}>
+                      <SpecPanel
+                        params={cadParams}
+                        onParamChange={handleCadParamChange}
+                        isUpdating={isReexecuting}
+                      />
+                    </div>
                   </div>
 
                 </div>
@@ -1182,7 +1211,7 @@ export default function App() {
                     How to configure custom API access keys?
                   </p>
                   <p className="text-[11.5px] text-orange-800 leading-relaxed font-sans">
-                    Define the <code className="font-mono bg-orange-100 px-1 py-0.2 rounded font-bold">GEMINI_API_KEY</code> environment variable in your project configuration menu to activate live image perception from your own uploaded sketches.
+                    Set <code className="font-mono bg-orange-100 px-1 py-0.2 rounded font-bold">GEMINI_API_KEY</code> and <code className="font-mono bg-orange-100 px-1 py-0.2 rounded font-bold">GEMINI_MODEL</code> in <code className="font-mono">wondercad/.env</code> to enable live drawing analysis and 3D generation.
                   </p>
                 </div>
               </div>

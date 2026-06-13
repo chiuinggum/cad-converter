@@ -27,7 +27,7 @@ export const LoopConsole: React.FC<LoopConsoleProps> = ({
   const activeIteration = iterations[activeIterationIndex];
 
   return (
-    <div className="border border-slate-200 rounded-xl bg-white shadow-sm overflow-hidden flex flex-col h-full text-left">
+    <div className="border border-slate-200 rounded-xl bg-white shadow-sm overflow-hidden flex flex-col h-full min-h-0 text-left">
       {/* Console Header */}
       <div className="p-4 border-b border-slate-200 bg-white flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -96,7 +96,7 @@ export const LoopConsole: React.FC<LoopConsoleProps> = ({
       )}
 
       {/* Active Iteration Console output (Terminal Logs) */}
-      <div className="flex-1 p-4 overflow-y-auto bg-slate-950 font-mono text-xs text-slate-300 leading-relaxed min-h-[220px] flex flex-col justify-between border-t border-slate-200">
+      <div className="flex-1 p-4 overflow-y-auto bg-slate-950 font-mono text-xs text-slate-300 leading-relaxed min-h-0 flex flex-col border-t border-slate-200">
         {activeIteration ? (
           <div>
             {/* Round Status card */}
@@ -129,7 +129,15 @@ export const LoopConsole: React.FC<LoopConsoleProps> = ({
             <div className="whitespace-pre-wrap select-all selection:bg-slate-800 text-left">
               {activeIteration.logs.split("\n").map((line, lIdx) => {
                 let colorClass = "text-slate-400";
-                if (line.startsWith("[Sandbox Executor]") || line.includes("NameError") || line.includes("Traceback") || line.includes("failure")) {
+                if (line.startsWith("[Drawing Agent]")) {
+                  colorClass = "text-violet-400";
+                } else if (line.startsWith("[Vision]") || line.startsWith("[Input]")) {
+                  colorClass = "text-cyan-400";
+                } else if (line.startsWith("[Clarifier]") || line.startsWith("[Answer Agent]")) {
+                  colorClass = "text-purple-400";
+                } else if (line.startsWith("[Coder]")) {
+                  colorClass = "text-blue-400";
+                } else if (line.startsWith("[Sandbox Executor]") || line.includes("NameError") || line.includes("Traceback") || line.includes("failure")) {
                   colorClass = "text-red-400";
                 } else if (line.startsWith("[Metrology Agent]") || line.includes("MATCH")) {
                   colorClass = "text-cyan-400";
