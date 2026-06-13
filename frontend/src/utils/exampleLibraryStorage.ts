@@ -8,6 +8,11 @@ import {
   folderIdForExample,
   IMPORTED_FOLDER_ID,
 } from "../data/examples";
+import {
+  readProjectStorage,
+  uploadImportImage,
+  writeProjectStorage,
+} from "./projectStorageClient";
 
 export interface ExampleLibraryState {
   folderOrder: string[];
@@ -16,8 +21,6 @@ export interface ExampleLibraryState {
   pathOverrides: Record<string, string>;
   customEntries: CustomDrawingEntry[];
 }
-
-const STORAGE_KEY = "wondercad_example_library";
 
 function defaultState(): ExampleLibraryState {
   return {
@@ -158,68 +161,102 @@ function migrateFolderOrder(folderOrder: string[], folders: ExampleFolder[]): st
   ];
 }
 
+function normalizeLibraryState(parsed: Partial<ExampleLibraryState> | null): ExampleLibraryState {
+  const customEntries = (parsed?.customEntries ?? []).map(({ imageDataUrl: _drop, ...entry }) => entry);
+  const knownIds = new Set([
+    ...DRAWING_EXAMPLES.map((e) => e.id),
+    ...customEntries.map((e) => e.id),
+  ]);
+  const folders = (parsed?.folders ?? []).map((folder) => ({
+    ...folder,
+    childIds: (folder.childIds ?? []).filter((id) => knownIds.has(id)),
+  }));
+  const defaultFolder = defaultState();
+  let mergedFolders = folders.length > 0 ? folders : defaultFolder.folders;
+  mergedFolders = ensureImportedFolder({
+    ...defaultFolder,
+    ...parsed,
+    folders: mergedFolders,
+    customEntries,
+  }).folders;
+  mergedFolders = migrateFolderLayout(mergedFolders);
+
+  const folderOrder = migrateFolderOrder(
+    parsed?.folderOrder?.length ? parsed.folderOrder : mergedFolders.map((f) => f.id),
+    mergedFolders
+  );
+
+  for (const ex of DRAWING_EXAMPLES) {
+    const inAny = mergedFolders.some((f) => f.childIds.includes(ex.id));
+    if (!inAny) {
+      const targetId = folderIdForExample(ex.id);
+      const targetFolder = mergedFolders.find((f) => f.id === targetId);
+      if (targetFolder) targetFolder.childIds.push(ex.id);
+    }
+  }
+
+  for (const entry of customEntries) {
+    const inAny = mergedFolders.some((f) => f.childIds.includes(entry.id));
+    if (!inAny) {
+      const importedFolder = mergedFolders.find((f) => f.id === IMPORTED_FOLDER_ID);
+      if (importedFolder) importedFolder.childIds.unshift(entry.id);
+    }
+  }
+
+  return {
+    folderOrder,
+    folders: mergedFolders,
+    expandedFolderIds: parsed?.expandedFolderIds ?? defaultFolder.expandedFolderIds,
+    pathOverrides: parsed?.pathOverrides ?? {},
+    customEntries,
+  };
+}
+
 export function loadExampleLibrary(): ExampleLibraryState {
+  const stored = readProjectStorage<Partial<ExampleLibraryState> | null>(
+    "example-library",
+    null
+  );
+  if (!stored) return defaultState();
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return defaultState();
-    const parsed = JSON.parse(raw) as ExampleLibraryState;
-    const customEntries = parsed.customEntries ?? [];
-    const knownIds = new Set([
-      ...DRAWING_EXAMPLES.map((e) => e.id),
-      ...customEntries.map((e) => e.id),
-    ]);
-    const folders = (parsed.folders ?? []).map((folder) => ({
-      ...folder,
-      childIds: (folder.childIds ?? []).filter((id) => knownIds.has(id)),
-    }));
-    const defaultFolder = defaultState();
-    let mergedFolders = folders.length > 0 ? folders : defaultFolder.folders;
-    mergedFolders = ensureImportedFolder({
-      ...defaultFolder,
-      ...parsed,
-      folders: mergedFolders,
-      customEntries,
-    }).folders;
-    mergedFolders = migrateFolderLayout(mergedFolders);
-
-    const folderOrder = migrateFolderOrder(
-      parsed.folderOrder?.length > 0
-        ? parsed.folderOrder
-        : mergedFolders.map((f) => f.id),
-      mergedFolders
-    );
-
-    for (const ex of DRAWING_EXAMPLES) {
-      const inAny = mergedFolders.some((f) => f.childIds.includes(ex.id));
-      if (!inAny) {
-        const targetId = folderIdForExample(ex.id);
-        const targetFolder = mergedFolders.find((f) => f.id === targetId);
-        if (targetFolder) targetFolder.childIds.push(ex.id);
-      }
-    }
-
-    for (const entry of customEntries) {
-      const inAny = mergedFolders.some((f) => f.childIds.includes(entry.id));
-      if (!inAny) {
-        const importedFolder = mergedFolders.find((f) => f.id === IMPORTED_FOLDER_ID);
-        if (importedFolder) importedFolder.childIds.unshift(entry.id);
-      }
-    }
-
-    return {
-      folderOrder,
-      folders: mergedFolders,
-      expandedFolderIds: parsed.expandedFolderIds ?? defaultFolder.expandedFolderIds,
-      pathOverrides: parsed.pathOverrides ?? {},
-      customEntries,
-    };
+    return normalizeLibraryState(stored);
   } catch {
     return defaultState();
   }
 }
 
+async function serializeCustomEntries(
+  entries: CustomDrawingEntry[]
+): Promise<CustomDrawingEntry[]> {
+  const serialized: CustomDrawingEntry[] = [];
+  for (const entry of entries) {
+    let imageFile = entry.imageFile;
+    if (entry.imageDataUrl?.startsWith("data:") && !imageFile) {
+      imageFile = await uploadImportImage(entry.id, entry.mimeType, entry.imageDataUrl);
+    }
+    serialized.push({
+      id: entry.id,
+      name: entry.name,
+      partType: entry.partType,
+      inputDrawing: entry.inputDrawing,
+      imageFile,
+      mimeType: entry.mimeType,
+      createdAt: entry.createdAt,
+      defaultPrompt: entry.defaultPrompt,
+    });
+  }
+  return serialized;
+}
+
 export function saveExampleLibrary(state: ExampleLibraryState) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  void (async () => {
+    try {
+      const customEntries = await serializeCustomEntries(state.customEntries ?? []);
+      writeProjectStorage("example-library", { ...state, customEntries });
+    } catch (err) {
+      console.error("Failed to save example library:", err);
+    }
+  })();
 }
 
 export function collectLibraryFileIds(library: ExampleLibraryState): string[] {

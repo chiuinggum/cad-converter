@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Send, Sparkles, MessageSquare, Paperclip, X, Bot, User, RefreshCw, CheckCircle2, Loader2, AlertCircle } from "lucide-react";
+import { Send, Sparkles, MessageSquare, Paperclip, X, Bot, User, RefreshCw, CheckCircle2, Loader2, AlertCircle, Zap } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { StreamTypewriter } from "./StreamTypewriter";
 import { ChatHistoryMenu } from "./ChatHistoryMenu";
@@ -35,6 +35,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   chatHistory,
   onSendMessage,
   isChatResponding,
+  pipelineActiveStep = null,
   pipelineRunning = false,
   historyEntries = [],
   onRestoreHistory,
@@ -66,30 +67,76 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     }
   };
 
-  const visibleMessages = chatHistory.filter((msg) => {
-    if (pipelineRunning && msg.kind === "pipeline_step") return false;
-    return true;
-  });
-
-  const renderGeneratingBanner = () => (
-    <div className="rounded-xl border border-orange-200 bg-gradient-to-r from-orange-50 via-white to-orange-50 p-3 shadow-sm pipeline-shimmer">
-      <div className="flex items-center gap-2">
-        <motion.div
-          animate={{ rotate: 360 }}
-          transition={{ repeat: Infinity, duration: 2, ease: "linear" }}
-          className="p-1 rounded-full bg-orange-100"
-        >
-          <Loader2 className="w-3.5 h-3.5 text-orange-600" />
-        </motion.div>
-        <span className="text-[11px] font-bold uppercase tracking-wide text-orange-800">
-          Generating 3D model…
-        </span>
+  const renderPipelineHeader = (msg: ChatMessage) => {
+    const allStepsDone = !pipelineRunning;
+    return (
+      <div
+        className={`rounded-xl border p-3 shadow-sm ${
+          pipelineRunning
+            ? "pipeline-shimmer border-orange-200 bg-gradient-to-r from-orange-50 via-white to-orange-50"
+            : "border-emerald-200 bg-emerald-50/50"
+        }`}
+      >
+        <div className="flex items-center gap-2 mb-2">
+          {pipelineRunning ? (
+            <motion.div
+              animate={{ rotate: 360 }}
+              transition={{ repeat: Infinity, duration: 2, ease: "linear" }}
+              className="p-1 rounded-full bg-orange-100"
+            >
+              <Zap className="w-3.5 h-3.5 text-orange-600" />
+            </motion.div>
+          ) : (
+            <div className="p-1 rounded-full bg-emerald-100">
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+            </div>
+          )}
+          <span
+            className={`text-[11px] font-bold uppercase tracking-wide ${
+              pipelineRunning ? "text-orange-800" : "text-emerald-800"
+            }`}
+          >
+            Pro-CAD Pipeline{allStepsDone ? " — Complete" : ""}
+          </span>
+        </div>
+        <p className="text-xs text-slate-600 mb-2">{msg.content}</p>
+        {msg.pipelineSteps && msg.pipelineSteps.length > 0 && (
+          <div className="flex flex-col gap-1">
+            {msg.pipelineSteps.map((step, idx) => {
+              const stepNum = idx + 1;
+              const isActive = pipelineRunning && pipelineActiveStep === stepNum;
+              const isDone =
+                allStepsDone ||
+                (pipelineActiveStep !== null && pipelineActiveStep > stepNum);
+              return (
+                <div
+                  key={`${step}-${idx}`}
+                  className={`flex items-center gap-2 text-[10px] font-mono px-2 py-1 rounded-md transition-all ${
+                    isActive
+                      ? "bg-orange-100 text-orange-800 ring-1 ring-orange-300"
+                      : isDone
+                        ? "text-emerald-700 bg-emerald-50/80"
+                        : "text-slate-400"
+                  }`}
+                >
+                  {isActive ? (
+                    <Loader2 className="w-3 h-3 animate-spin text-orange-600" />
+                  ) : isDone ? (
+                    <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                  ) : (
+                    <span className="w-3 h-3 rounded-full border border-slate-300" />
+                  )}
+                  <span>
+                    {stepNum}. {step}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
-      <p className="text-xs text-slate-500 mt-1.5">
-        Pipeline is running. Detailed logs appear in the panel below.
-      </p>
-    </div>
-  );
+    );
+  };
 
   const renderPipelineStep = (msg: ChatMessage) => {
     const isRunning = msg.stepStatus === "running";
@@ -113,7 +160,8 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
           )}
           <span className="font-bold text-slate-800 text-[11px]">
-            {msg.stepName || `Step ${msg.stepIndex}`}
+            {msg.stepIndex != null ? `Step ${msg.stepIndex}: ` : ""}
+            {msg.stepName || "Pipeline step"}
           </span>
         </div>
         <p className="text-slate-600 leading-relaxed whitespace-pre-line font-sans max-h-[280px] overflow-y-auto">
@@ -176,18 +224,13 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         className="flex-1 p-4 overflow-y-auto flex flex-col gap-3 min-h-[160px] bg-slate-50/40"
       >
         <AnimatePresence initial={false}>
-          {pipelineRunning && renderGeneratingBanner()}
-
-          {visibleMessages.length > 0 ? (
-            visibleMessages.map((msg) => {
+          {chatHistory.length > 0 ? (
+            chatHistory.map((msg) => {
               const isBot = msg.role === "assistant";
               if (msg.kind === "pipeline_header") {
-                if (pipelineRunning) return null;
                 return (
                   <motion.div key={msg.id} layout className="self-start max-w-full">
-                    <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-3 text-xs text-slate-600">
-                      {msg.content}
-                    </div>
+                    {renderPipelineHeader(msg)}
                   </motion.div>
                 );
               }

@@ -27,5 +27,6 @@ data/
 # Local model weights and session artifacts
 src/Pro-CAD/models/
 frontend/.sessions/
+.wondercad-storage/
 frontend/.env
 src/Pro-CAD/.env

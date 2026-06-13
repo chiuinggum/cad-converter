@@ -2,6 +2,10 @@ import { ChatMessage } from "../components/ChatPanel";
 import { PipelineIteration } from "../types";
 import { CadParam } from "./cadParams";
 import { DrawingSpecData } from "../components/DrawingSpecPanel";
+import {
+  readProjectStorage,
+  writeProjectStorage,
+} from "./projectStorageClient";
 
 export interface ExampleWorkspace {
   exampleId: string;
@@ -27,9 +31,19 @@ export interface WorkspaceHistoryEntry {
   workspace: ExampleWorkspace;
 }
 
-const STORAGE_KEY = "wondercad_example_workspaces";
-const HISTORY_KEY = "wondercad_workspace_history";
-const MAX_HISTORY_PER_EXAMPLE = 12;
+const MAX_HISTORY_PER_EXAMPLE = 8;
+
+function stripChatHistory(messages: ChatMessage[] | undefined): ChatMessage[] {
+  return (messages ?? []).map(({ image: _image, ...rest }) => rest);
+}
+
+export function stripWorkspaceForStorage(workspace: ExampleWorkspace): ExampleWorkspace {
+  return {
+    ...workspace,
+    examplePreviewUrl: null,
+    chatHistory: stripChatHistory(workspace.chatHistory),
+  };
+}
 
 function workspaceHasContent(ws: ExampleWorkspace): boolean {
   return Boolean(
@@ -42,19 +56,13 @@ function workspaceHasContent(ws: ExampleWorkspace): boolean {
 }
 
 export function loadAllWorkspaces(): Record<string, ExampleWorkspace> {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return {};
-    return JSON.parse(raw) as Record<string, ExampleWorkspace>;
-  } catch {
-    return {};
-  }
+  return readProjectStorage<Record<string, ExampleWorkspace>>("workspaces", {});
 }
 
 export function saveWorkspace(workspace: ExampleWorkspace) {
   const all = loadAllWorkspaces();
-  all[workspace.exampleId] = workspace;
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
+  all[workspace.exampleId] = stripWorkspaceForStorage(workspace);
+  writeProjectStorage("workspaces", all);
 }
 
 export function getWorkspace(exampleId: string): ExampleWorkspace | null {
@@ -62,17 +70,14 @@ export function getWorkspace(exampleId: string): ExampleWorkspace | null {
 }
 
 function loadAllHistory(): Record<string, WorkspaceHistoryEntry[]> {
-  try {
-    const raw = localStorage.getItem(HISTORY_KEY);
-    if (!raw) return {};
-    return JSON.parse(raw) as Record<string, WorkspaceHistoryEntry[]>;
-  } catch {
-    return {};
-  }
+  return readProjectStorage<Record<string, WorkspaceHistoryEntry[]>>(
+    "workspace-history",
+    {}
+  );
 }
 
 function saveAllHistory(all: Record<string, WorkspaceHistoryEntry[]>) {
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(all));
+  writeProjectStorage("workspace-history", all);
 }
 
 export function loadWorkspaceHistory(exampleId: string): WorkspaceHistoryEntry[] {
@@ -90,7 +95,7 @@ export function archiveWorkspaceHistory(exampleId: string, workspace: ExampleWor
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     savedAt: new Date().toISOString(),
     label,
-    workspace: { ...workspace, exampleId },
+    workspace: stripWorkspaceForStorage({ ...workspace, exampleId }),
   };
 
   const all = loadAllHistory();

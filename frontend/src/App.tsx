@@ -367,9 +367,17 @@ export default function App() {
   };
 
   const handleProcadStreamEvent = (event: ProcadStreamEvent) => {
+    const runId = pipelineRunIdRef.current;
+
     if (event.type === "pipeline_start") {
       setModelPreviews([]);
       setActivePreviewId(null);
+      upsertChatMessage(`pipeline-header-${runId}`, {
+        role: "assistant",
+        content: event.message || "Pipeline started",
+        kind: "pipeline_header",
+        pipelineSteps: event.steps || [],
+      });
       setPipelineStatusLabel("Generating…");
       return;
     }
@@ -388,20 +396,54 @@ export default function App() {
 
     if (event.type === "step_start" && event.step) {
       setPipelineActiveStep(event.step);
-      setPipelineStatusLabel("Generating…");
+      setPipelineStatusLabel(event.stepName || event.message || "Running…");
+      upsertChatMessage(`pipeline-step-${runId}-${event.step}`, {
+        role: "assistant",
+        content: event.message || "",
+        kind: "pipeline_step",
+        stepIndex: event.step,
+        stepName: event.stepName || `Step ${event.step}`,
+        stepStatus: "running",
+        streamActive: true,
+      });
       return;
     }
 
     if (event.type === "step_progress" && event.step) {
-      setPipelineStatusLabel("Generating…");
+      setPipelineStatusLabel(event.stepName || event.message || "Running…");
+      const progressIter = event.iteration as unknown as PipelineIteration | undefined;
+      const progressText = progressIter?.logs || event.message || "";
+      upsertChatMessage(`pipeline-step-${runId}-${event.step}`, {
+        role: "assistant",
+        content: progressText,
+        kind: "pipeline_step",
+        stepIndex: event.step,
+        stepName: event.stepName || `Step ${event.step}`,
+        stepStatus: "running",
+        streamActive: true,
+        imageUrls: event.imageUrls || progressIter?.imageUrls,
+      });
       return;
     }
 
     if (event.type === "step_done" && event.step) {
       const iteration = event.iteration as unknown as PipelineIteration | undefined;
+      const status = iteration?.status === "success" ? "success" : "error";
+      const doneText = iteration?.logs || event.message || "";
+      const imageUrls = event.imageUrls || iteration?.imageUrls;
       if (event.drawingSpec) {
         setDrawingSpec(event.drawingSpec as DrawingSpecData);
       }
+      upsertChatMessage(`pipeline-step-${runId}-${event.step}`, {
+        role: "assistant",
+        content: doneText,
+        kind: "pipeline_step",
+        stepIndex: event.step,
+        stepName: event.stepName || iteration?.stepName || `Step ${event.step}`,
+        stepStatus: status,
+        streamActive: false,
+        imageUrls,
+      });
       if (iteration) {
         setIterations((prev) => {
           const next = [...prev];

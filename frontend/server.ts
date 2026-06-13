@@ -38,6 +38,43 @@ function resolveProcadRoot(): string {
 const PROCAD_ROOT = resolveProcadRoot();
 const PROCAD_SERVICE = path.join(FRONTEND_ROOT, "procad_service.py");
 const SESSIONS_DIR = path.join(FRONTEND_ROOT, ".sessions");
+const STORAGE_ROOT = path.join(WONDERCAD_ROOT, ".wondercad-storage");
+const STORAGE_IMPORTS_DIR = path.join(STORAGE_ROOT, "imports");
+
+const STORAGE_FILES: Record<string, string> = {
+  workspaces: path.join(STORAGE_ROOT, "workspaces.json"),
+  "workspace-history": path.join(STORAGE_ROOT, "workspace-history.json"),
+  "example-library": path.join(STORAGE_ROOT, "example-library.json"),
+};
+
+function ensureStorageDirs() {
+  fs.mkdirSync(STORAGE_ROOT, { recursive: true });
+  fs.mkdirSync(STORAGE_IMPORTS_DIR, { recursive: true });
+}
+
+function readStorageJson(name: string, fallback: unknown) {
+  ensureStorageDirs();
+  const filePath = STORAGE_FILES[name];
+  if (!filePath || !fs.existsSync(filePath)) return fallback;
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStorageJson(name: string, data: unknown) {
+  ensureStorageDirs();
+  const filePath = STORAGE_FILES[name];
+  if (!filePath) throw new Error(`Unknown storage key: ${name}`);
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf8");
+}
+
+function extensionForMime(mimeType: string): string {
+  if (mimeType.includes("jpeg") || mimeType.includes("jpg")) return ".jpg";
+  if (mimeType.includes("webp")) return ".webp";
+  return ".png";
+}
 
 function callProcadService(
   action: "generate" | "chat" | "generate_stream" | "chat_stream" | "get_session" | "reexecute",
@@ -336,8 +373,72 @@ async function startServer() {
 
   // API 1: Healthcheck
   app.get("/api/health", (req, res) => {
-    res.json({ status: "ok", geminiConfigured: !!ai });
+    res.json({ status: "ok", geminiConfigured: !!ai, storageRoot: STORAGE_ROOT });
   });
+
+  app.get("/api/storage/:name", (req, res) => {
+    const name = req.params.name;
+    if (!STORAGE_FILES[name]) {
+      return res.status(404).json({ error: "Unknown storage key" });
+    }
+    const fallback =
+      name === "workspaces" || name === "workspace-history" ? {} : null;
+    res.json(readStorageJson(name, fallback));
+  });
+
+  app.put("/api/storage/:name", (req, res) => {
+    const name = req.params.name;
+    if (!STORAGE_FILES[name]) {
+      return res.status(404).json({ error: "Unknown storage key" });
+    }
+    try {
+      writeStorageJson(name, req.body);
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
+  app.post("/api/storage/imports", (req, res) => {
+    try {
+      const { id, mimeType, dataUrl } = req.body as {
+        id?: string;
+        mimeType?: string;
+        dataUrl?: string;
+      };
+      if (!id || !dataUrl) {
+        return res.status(400).json({ error: "Missing id or dataUrl" });
+      }
+      const base64 = dataUrl.includes("base64,")
+        ? dataUrl.split("base64,")[1]
+        : dataUrl;
+      const ext = extensionForMime(mimeType || "image/png");
+      const safeId = id.replace(/[^a-zA-Z0-9_-]/g, "_");
+      const filename = `${safeId}${ext}`;
+      ensureStorageDirs();
+      fs.writeFileSync(
+        path.join(STORAGE_IMPORTS_DIR, filename),
+        Buffer.from(base64, "base64")
+      );
+      res.json({ filename });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
+  app.post("/api/storage/clear", (_req, res) => {
+    try {
+      if (fs.existsSync(STORAGE_ROOT)) {
+        fs.rmSync(STORAGE_ROOT, { recursive: true, force: true });
+      }
+      ensureStorageDirs();
+      res.json({ ok: true, storageRoot: STORAGE_ROOT });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
+  app.use("/api/storage/imports", express.static(STORAGE_IMPORTS_DIR));
 
   // API 2: Technical Drawing Perception
   app.post("/api/perceive", async (req, res) => {
@@ -768,8 +869,10 @@ You must return your reply in structured JSON ONLY, with this schema:
   }
 
   app.listen(PORT, "0.0.0.0", () => {
+    ensureStorageDirs();
     console.log(`Server is running internally on port ${PORT}`);
     console.log(`Pro-CAD root: ${PROCAD_ROOT}`);
+    console.log(`WonderCAD storage: ${STORAGE_ROOT}`);
   });
 }
 
