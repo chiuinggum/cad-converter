@@ -1,0 +1,6 @@
+{
+  "name": "CAD Agentic Reconstruction Workflow",
+  "description": "An agentic pipeline that converts 2D technical drawing into a parametric 3D CadQuery CAD model with dynamic self-correction and validation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,26 @@
+@import "tailwindcss";
+
+@keyframes pipeline-shimmer-keyframes {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.pipeline-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgb(234 88 12) 0%,
+    rgb(251 146 60) 50%,
+    rgb(234 88 12) 100%
+  );
+  background-size: 200% 100%;
+  animation: pipeline-shimmer-keyframes 2.2s ease-in-out infinite;
+}
+
+.pipeline-glow {
+  animation: pipeline-glow-keyframes 2s ease-in-out infinite;
+}
+
+@keyframes pipeline-glow-keyframes {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(234, 88, 12, 0.25); }
+  50% { box-shadow: 0 0 0 4px rgba(234, 88, 12, 0.15); }
+}
