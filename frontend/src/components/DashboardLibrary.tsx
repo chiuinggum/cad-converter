@@ -173,7 +173,7 @@ export const DashboardLibrary: React.FC<DashboardLibraryProps> = ({
                       type="button"
                       disabled={isBatching || children.length === 0}
                       onClick={() => onBatchRun(folder.id)}
-                      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-orange-200 bg-orange-50 text-orange-700 font-semibold text-[10px] hover:bg-orange-100 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                      className="inline-flex min-w-[5.75rem] shrink-0 items-center justify-center gap-1.5 whitespace-nowrap px-3 py-1.5 rounded-lg border border-orange-200 bg-orange-50 text-orange-700 font-semibold text-[10px] hover:bg-orange-100 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
                     >
                       {isBatching ? (
                         <Loader2 className="w-3 h-3 animate-spin" />
@@ -200,6 +200,8 @@ export const DashboardLibrary: React.FC<DashboardLibraryProps> = ({
                 {expanded &&
                   visibleChildren.map((ex) => {
                     const isSelected = ex.id === selectedExampleId;
+                    const selectedCell =
+                      "bg-orange-50/80 border-t-2 border-b-2 border-orange-300 first:border-l-[3px] first:border-l-orange-600 last:border-r-2 last:border-r-orange-300";
                     return (
                       <tr
                         key={ex.id}
@@ -224,41 +226,66 @@ export const DashboardLibrary: React.FC<DashboardLibraryProps> = ({
                         }}
                         onDragEnd={() => setDragItem(null)}
                         onClick={() => onSelectExample(ex.id)}
-                        className={`hover:bg-slate-50/70 transition cursor-pointer ${
-                          isSelected
-                            ? "bg-amber-50/35 hover:bg-amber-50/50 border-l-2 border-amber-600"
-                            : ""
+                        className={`transition cursor-pointer relative ${
+                          isSelected ? "z-[1]" : "hover:bg-slate-50/70"
                         }`}
                       >
-                        <td className="py-3 px-4 text-slate-300">
+                        <td
+                          className={`py-3 px-4 text-slate-300 ${
+                            isSelected ? selectedCell : ""
+                          }`}
+                        >
                           <GripVertical className="w-4 h-4" />
                         </td>
-                        <td className="py-3.5 px-4 font-bold text-slate-800 tracking-tight pl-6">
+                        <td
+                          className={`py-3.5 px-4 font-bold text-slate-800 tracking-tight pl-6 ${
+                            isSelected ? selectedCell : ""
+                          }`}
+                        >
                           {ex.name}
                         </td>
-                        <td className="py-3.5 px-4 text-slate-500 font-medium">
+                        <td
+                          className={`py-3.5 px-4 text-slate-500 font-medium ${
+                            isSelected ? selectedCell : ""
+                          }`}
+                        >
                           {ex.partType}
                         </td>
-                        <td className="py-3.5 px-4" onClick={(e) => e.stopPropagation()}>
-                          <input
-                            type="text"
-                            value={ex.relativePath}
-                            onChange={(e) => updatePath(ex.id, e.target.value)}
-                            className="w-full min-w-[200px] px-2 py-1.5 bg-white border border-slate-200 rounded font-mono text-[10px] text-slate-600 focus:outline-none focus:border-orange-400"
-                            title="Relative path under wondercad/example/"
-                          />
+                        <td
+                          className={`py-3.5 px-4 ${isSelected ? selectedCell : ""}`}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {ex.relativePath.startsWith("imported://") ? (
+                            <span className="inline-flex items-center px-2 py-1.5 rounded bg-orange-50 border border-orange-100 font-mono text-[10px] text-orange-700">
+                              Imported upload
+                            </span>
+                          ) : (
+                            <input
+                              type="text"
+                              value={ex.relativePath}
+                              onChange={(e) => updatePath(ex.id, e.target.value)}
+                              className="w-full min-w-[200px] px-2 py-1.5 bg-white border border-slate-200 rounded font-mono text-[10px] text-slate-600 focus:outline-none focus:border-orange-400"
+                              title="Relative path under wondercad/example/"
+                            />
+                          )}
                         </td>
-                        <td className="py-3.5 px-4">
+                        <td
+                          className={`py-3.5 px-4 ${isSelected ? selectedCell : ""}`}
+                        >
                           <img
                             src={ex.imageUrl}
                             alt={ex.name}
-                            className="w-12 h-12 rounded border border-slate-200 object-cover bg-white"
+                            className={`w-12 h-12 rounded border object-cover bg-white ${
+                              isSelected ? "border-orange-300" : "border-slate-200"
+                            }`}
                             onError={(e) => {
                               (e.target as HTMLImageElement).style.opacity = "0.35";
                             }}
                           />
                         </td>
-                        <td className="py-3.5 px-4">
+                        <td
+                          className={`py-3.5 px-4 ${isSelected ? selectedCell : ""}`}
+                        >
                           <button
                             type="button"
                             onClick={(e) => {

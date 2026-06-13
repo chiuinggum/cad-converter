@@ -11,6 +11,11 @@ export type ProcadStreamEvent = {
   questions?: string[];
   answers?: string[];
   drawingSpec?: Record<string, unknown>;
+  previewId?: string;
+  label?: string;
+  glbUrl?: string;
+  sessionId?: string;
+  imageUrls?: string[];
 };
 
 export async function consumeProcadStream(

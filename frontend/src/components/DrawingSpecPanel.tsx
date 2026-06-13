@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { FileJson, ChevronDown, ChevronRight, AlertTriangle } from "lucide-react";
+import { FileJson, ChevronDown, ChevronRight } from "lucide-react";
 
 export interface DrawingSpecData {
   part_name?: string | null;
@@ -33,7 +33,6 @@ export const DrawingSpecPanel: React.FC<DrawingSpecPanelProps> = ({ spec }) => {
   const dims = spec.dimensions ?? [];
   const features = spec.features ?? [];
   const views = spec.views ?? [];
-  const ambiguities = spec.ambiguities ?? [];
 
   return (
     <div className="border border-slate-200 rounded-xl bg-white shadow-sm flex flex-col h-full overflow-hidden text-left min-h-0">
@@ -127,22 +126,6 @@ export const DrawingSpecPanel: React.FC<DrawingSpecPanelProps> = ({ spec }) => {
               {features.map((f) => (
                 <li key={f.id} className="text-[11px] text-slate-600">
                   <span className="font-mono text-orange-700">{f.feature_type}</span> — {f.description}
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
-
-        {ambiguities.length > 0 && (
-          <section>
-            <h3 className="text-[10px] font-bold text-amber-600 uppercase tracking-wider mb-1.5 flex items-center gap-1">
-              <AlertTriangle className="w-3 h-3" />
-              Ambiguities
-            </h3>
-            <ul className="space-y-1.5">
-              {ambiguities.map((a) => (
-                <li key={a.id} className="text-[11px] text-amber-800 bg-amber-50 border border-amber-100 rounded px-2 py-1">
-                  {a.question || a.description}
                 </li>
               ))}
             </ul>

@@ -315,3 +315,76 @@ class DrawingRefinementResult(StrictModel):
     final_spec: DrawingSpec
     final_review: DrawingSpecReview
     history: list[RefinementIteration]
+
+
+class CodeSpecDimension(StrictModel):
+    id: str
+    dimension_type: str
+    value: float | None
+    unit: str
+    applies_to: str
+
+
+class CodeSpecFeature(StrictModel):
+    id: str
+    feature_type: str
+    description: str
+
+
+class CodeDerivedSpec(StrictModel):
+    schema_version: str = "0.1.0"
+    default_unit: str
+    dimensions: list[CodeSpecDimension]
+    features: list[CodeSpecFeature]
+    general_notes: list[str]
+
+
+class SpecMismatch(StrictModel):
+    id: str
+    category: str
+    description: str
+    drawing_value: str | None
+    code_value: str | None
+    severity: str
+
+
+class SpecValidationResult(StrictModel):
+    schema_version: str = "0.1.0"
+    consistent: bool
+    summary: str
+    mismatches: list[SpecMismatch]
+
+
+class ProjectionKind(str, Enum):
+    ORTHOGRAPHIC = "orthographic"
+    PERSPECTIVE = "perspective"
+
+
+class ViewRegionBox(StrictModel):
+    id: str
+    view_type: ViewType
+    projection: ProjectionKind
+    label: str | None
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+class ViewDecoupleResult(StrictModel):
+    schema_version: str = "0.1.0"
+    views: list[ViewRegionBox]
+    layout_description: str
+    notes: list[str]
+
+
+class VisualComparisonIssue(StrictModel):
+    id: str
+    view_id: str | None
+    severity: str
+    description: str
+
+
+class VisualValidationResult(StrictModel):
+    schema_version: str = "0.1.0"
+    consistent: bool
+    score: float = Field(ge=0.0, le=1.0)
+    summary: str
+    issues: list[VisualComparisonIssue]

@@ -42,4 +42,5 @@ export interface PipelineIteration {
   code: string;
   comparison: ComparisonResult[] | null;
   failing: string[];
+  imageUrls?: string[];
 }

@@ -1,33 +1,52 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { DrawingExplorer } from "./components/DrawingExplorer";
 import { CADViewer } from "./components/CADViewer";
 import { GLBViewer } from "./components/GLBViewer";
+import { MultiModelViewport, ModelPreviewSlot } from "./components/MultiModelViewport";
 import { LoopConsole } from "./components/LoopConsole";
 import { ChatPanel, ChatMessage } from "./components/ChatPanel";
 import { SpecManifest, PipelineIteration, ComparisonResult } from "./types";
 import { consumeProcadStream, ProcadStreamEvent } from "./utils/procadStream";
-import { DRAWING_EXAMPLES, resolveAllExamples, resolveExample } from "./data/examples";
+import { DRAWING_EXAMPLES, resolveExample, resolveLibraryExamples, effectiveGeneratePrompt } from "./data/examples";
 import { SpecPanel } from "./components/SpecPanel";
 import { DrawingSpecPanel, DrawingSpecData } from "./components/DrawingSpecPanel";
 import { DashboardLibrary, BatchProgress } from "./components/DashboardLibrary";
+import { DashboardStats } from "./components/DashboardStats";
 import { extractCadParams, applyCadParamValue } from "./utils/cadParams";
 import { mimeFromAssetPath } from "./utils/exampleAssets";
 import {
   loadExampleLibrary,
   saveExampleLibrary,
   ExampleLibraryState,
+  addCustomEntryToLibrary,
+  createCustomEntry,
+  collectLibraryFileIds,
+  countLibraryFolders,
 } from "./utils/exampleLibraryStorage";
+import {
+  loadPipelineMethod,
+  savePipelineMethod,
+  pipelineStepsForMethod,
+  PIPELINE_METHOD_LABELS,
+  PIPELINE_METHOD_ORDER,
+  V4_SETTINGS_INFO,
+  PipelineMethod,
+} from "./utils/pipelineSettings";
 import {
   getWorkspace,
   saveWorkspace as persistWorkspace,
+  loadWorkspaceHistory,
+  archiveWorkspaceHistory,
+  WorkspaceHistoryEntry,
+  countWorkspacesWithResults,
 } from "./utils/workspaceStorage";
-import { CADConverterLogo } from "./components/CADConverterLogo";
+import { WonderCADLogo } from "./components/WonderCADLogo";
 import { ResizeHandle } from "./components/ResizeHandle";
 import { useResizeWidth } from "./hooks/useResize";
 import { 
-  Folder, CheckCircle2, Search, ChevronDown, SlidersHorizontal, 
+  CheckCircle2, Search, ChevronDown, SlidersHorizontal, 
   ChevronLeft, Maximize2, Settings, Laptop, Play,
-  LayoutDashboard, Activity, Info, FileImage
+  LayoutDashboard, Activity, Info
 } from "lucide-react";
 
 export default function App() {
@@ -40,6 +59,9 @@ export default function App() {
     loadExampleLibrary()
   );
   const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null);
+  const [pipelineMethod, setPipelineMethod] = useState<PipelineMethod>(() =>
+    loadPipelineMethod()
+  );
 
   const [activeExampleId, setActiveExampleId] = useState<string>(DRAWING_EXAMPLES[0].id);
   const [examplePreviewUrl, setExamplePreviewUrl] = useState<string | null>(null);
@@ -66,8 +88,31 @@ export default function App() {
   const [cadParams, setCadParams] = useState<ReturnType<typeof extractCadParams>>([]);
   const [drawingSpec, setDrawingSpec] = useState<DrawingSpecData | null>(null);
   const [isReexecuting, setIsReexecuting] = useState(false);
+  const [modelPreviews, setModelPreviews] = useState<ModelPreviewSlot[]>([]);
+  const [activePreviewId, setActivePreviewId] = useState<string | null>(null);
+  const [workspaceHistory, setWorkspaceHistory] = useState<WorkspaceHistoryEntry[]>(() =>
+    loadWorkspaceHistory(DRAWING_EXAMPLES[0].id)
+  );
+  const [workspaceTick, setWorkspaceTick] = useState(0);
 
-  const resolvedExamples = resolveAllExamples(exampleLibrary.pathOverrides);
+  const resolvedExamples = useMemo(
+    () =>
+      resolveLibraryExamples(
+        exampleLibrary.pathOverrides,
+        exampleLibrary.customEntries ?? []
+      ),
+    [exampleLibrary.pathOverrides, exampleLibrary.customEntries]
+  );
+
+  const dashboardStats = useMemo(() => {
+    const fileIds = collectLibraryFileIds(exampleLibrary);
+    const totalFiles = fileIds.length;
+    const folderCount = countLibraryFolders(exampleLibrary);
+    const withResults = countWorkspacesWithResults(fileIds);
+    const importedIds = new Set((exampleLibrary.customEntries ?? []).map((e) => e.id));
+    const importedCount = fileIds.filter((id) => importedIds.has(id)).length;
+    return { totalFiles, folderCount, withResults, importedCount };
+  }, [exampleLibrary, workspaceTick]);
 
   const handleLibraryChange = (patch: Partial<ExampleLibraryState>) => {
     setExampleLibrary((prev) => {
@@ -80,9 +125,34 @@ export default function App() {
   const pipelineRunIdRef = useRef<number>(0);
   const reexecuteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const upsertModelPreview = useCallback((slot: ModelPreviewSlot) => {
+    setModelPreviews((prev) => {
+      const idx = prev.findIndex((p) => p.id === slot.id);
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = slot;
+        return next;
+      }
+      return [...prev, slot];
+    });
+    setActivePreviewId(slot.id);
+  }, []);
+
   const findResolvedExample = (exampleId: string) => {
     const fromList = resolvedExamples.find((e) => e.id === exampleId);
     if (fromList) return fromList;
+    const custom = (exampleLibrary.customEntries ?? []).find((e) => e.id === exampleId);
+    if (custom) {
+      return {
+        id: custom.id,
+        name: custom.name,
+        partType: custom.partType,
+        inputDrawing: custom.inputDrawing,
+        relativePath: `imported://${custom.id}`,
+        defaultPrompt: custom.defaultPrompt,
+        imageUrl: custom.imageDataUrl,
+      };
+    }
     const base = DRAWING_EXAMPLES.find((e) => e.id === exampleId);
     if (base) return resolveExample(base, exampleLibrary.pathOverrides);
     return resolvedExamples[0];
@@ -131,6 +201,7 @@ export default function App() {
   useEffect(() => {
     const timer = setTimeout(() => {
       persistWorkspace(workspaceSnapshotRef.current);
+      setWorkspaceTick((t) => t + 1);
     }, 500);
     return () => clearTimeout(timer);
   }, [snapshotWorkspace]);
@@ -149,6 +220,21 @@ export default function App() {
     setDrawingSpec(ws.drawingSpec ?? null);
     setIterations(ws.iterations || []);
     setActiveIterationIndex(ws.activeIterationIndex || 0);
+    setModelPreviews([]);
+    if (ws.glbUrl) {
+      setModelPreviews([
+        {
+          id: "final",
+          label: "Restored model",
+          glbUrl: ws.glbUrl,
+        },
+      ]);
+      setActivePreviewId("final");
+    }
+  };
+
+  const refreshWorkspaceHistory = (exampleId: string) => {
+    setWorkspaceHistory(loadWorkspaceHistory(exampleId));
   };
 
   const fetchExamplePreview = async (imageUrl: string): Promise<string | null> => {
@@ -176,6 +262,7 @@ export default function App() {
 
     setSelectedExampleId(exampleId);
     setActiveExampleId(exampleId);
+    refreshWorkspaceHistory(exampleId);
 
     const saved = getWorkspace(exampleId);
     if (saved) {
@@ -206,10 +293,15 @@ export default function App() {
 
     let preview: string | null = null;
     if (example.imageUrl) {
-      setIsPerceiving(true);
-      preview = await fetchExamplePreview(example.imageUrl);
-      setExamplePreviewUrl(preview);
-      setIsPerceiving(false);
+      if (example.imageUrl.startsWith("data:")) {
+        preview = example.imageUrl;
+        setExamplePreviewUrl(preview);
+      } else {
+        setIsPerceiving(true);
+        preview = await fetchExamplePreview(example.imageUrl);
+        setExamplePreviewUrl(preview);
+        setIsPerceiving(false);
+      }
     } else {
       setExamplePreviewUrl(null);
     }
@@ -222,14 +314,26 @@ export default function App() {
     loadExample(exampleId);
   };
 
-  const handleCustomImageUploaded = (base64Image: string, _mimeType: string) => {
-    setActiveExampleId("custom");
-    setExamplePreviewUrl(null);
+  const handleCustomImageUploaded = (
+    base64Image: string,
+    mimeType: string,
+    fileName: string
+  ) => {
+    const entry = createCustomEntry(fileName, base64Image, mimeType);
+    const nextLibrary = addCustomEntryToLibrary(exampleLibrary, entry);
+    setExampleLibrary(nextLibrary);
+    saveExampleLibrary(nextLibrary);
+
+    setSelectedExampleId(entry.id);
+    setActiveExampleId(entry.id);
+    refreshWorkspaceHistory(entry.id);
+    setExamplePreviewUrl(base64Image);
+    setPromptText(entry.defaultPrompt);
     setActiveView("reconstruct");
-    appendChatMessage("user", "Uploaded reference drawing for Pro-CAD generation.", base64Image);
+    appendChatMessage("user", `Uploaded reference drawing: ${entry.name}`, base64Image);
   };
 
-  // Pro-CAD: prompt + optional image → clarify → codegen → 3D (streaming)
+  // Pro-CAD: prompt + optional image → spec extract → codegen → 3D (streaming)
   const upsertChatMessage = (id: string, patch: Partial<ChatMessage> & { role: ChatMessage["role"]; content: string }) => {
     setChatHistory((prev) => {
       const idx = prev.findIndex((m) => m.id === id);
@@ -259,70 +363,45 @@ export default function App() {
     if (data.drawingSpec) {
       setDrawingSpec(data.drawingSpec as DrawingSpecData);
     }
+    setWorkspaceTick((t) => t + 1);
   };
 
   const handleProcadStreamEvent = (event: ProcadStreamEvent) => {
-    const runId = pipelineRunIdRef.current;
-
     if (event.type === "pipeline_start") {
-      upsertChatMessage(`pipeline-header-${runId}`, {
-        role: "assistant",
-        content: event.message || "Pipeline started",
-        kind: "pipeline_header",
-        pipelineSteps: event.steps || [],
+      setModelPreviews([]);
+      setActivePreviewId(null);
+      setPipelineStatusLabel("Generating…");
+      return;
+    }
+
+    if (event.type === "model_preview" && event.glbUrl && event.previewId) {
+      const bust = "?t=" + Date.now();
+      upsertModelPreview({
+        id: event.previewId,
+        label: event.label || event.previewId,
+        glbUrl: event.glbUrl + bust,
       });
+      setGlbUrl(event.glbUrl + bust);
+      if (event.sessionId) setProcadSessionId(event.sessionId);
       return;
     }
 
     if (event.type === "step_start" && event.step) {
       setPipelineActiveStep(event.step);
-      setPipelineStatusLabel(event.message || event.stepName || "Running…");
-      upsertChatMessage(`pipeline-step-${runId}-${event.step}`, {
-        role: "assistant",
-        content: event.message || "",
-        kind: "pipeline_step",
-        stepIndex: event.step,
-        stepName: event.stepName || `Step ${event.step}`,
-        stepStatus: "running",
-        streamActive: true,
-      });
+      setPipelineStatusLabel("Generating…");
       return;
     }
 
     if (event.type === "step_progress" && event.step) {
-      setPipelineStatusLabel(event.message || "");
-      const progressIter = event.iteration as unknown as PipelineIteration | undefined;
-      const progressText =
-        progressIter?.logs || event.message || "";
-      upsertChatMessage(`pipeline-step-${runId}-${event.step}`, {
-        role: "assistant",
-        content: progressText,
-        kind: "pipeline_step",
-        stepIndex: event.step,
-        stepName: event.stepName || `Step ${event.step}`,
-        stepStatus: "running",
-        streamActive: true,
-      });
+      setPipelineStatusLabel("Generating…");
       return;
     }
 
     if (event.type === "step_done" && event.step) {
       const iteration = event.iteration as unknown as PipelineIteration | undefined;
-      const status = iteration?.status === "success" ? "success" : "error";
-      const doneText =
-        iteration?.logs || event.message || "";
       if (event.drawingSpec) {
         setDrawingSpec(event.drawingSpec as DrawingSpecData);
       }
-      upsertChatMessage(`pipeline-step-${runId}-${event.step}`, {
-        role: "assistant",
-        content: doneText,
-        kind: "pipeline_step",
-        stepIndex: event.step,
-        stepName: event.stepName || iteration?.stepName || `Step ${event.step}`,
-        stepStatus: status,
-        streamActive: false,
-      });
       if (iteration) {
         setIterations((prev) => {
           const next = [...prev];
@@ -338,13 +417,27 @@ export default function App() {
         }
       }
       setPipelineActiveStep(event.step + 1);
+      setPipelineStatusLabel("Generating…");
       return;
     }
 
     if (event.type === "complete" && event.result) {
       const data = event.result;
       applyProcadResult(data);
+      refreshWorkspaceHistory(activeExampleId);
+      if (data.glbUrl) {
+        const bust = "?t=" + Date.now();
+        upsertModelPreview({
+          id: "final",
+          label: "Final export",
+          glbUrl: (data.glbUrl as string) + bust,
+        });
+      }
       if (data.success) {
+        const visualWarn = data.visualValidationWarning as string | undefined;
+        const doneMsg = visualWarn
+          ? `Model exported successfully. Visual validation did not pass: ${visualWarn}`
+          : "All done! The CadQuery model is ready — rotate it in the viewport and download exports.";
         if (data.reply) {
           upsertChatMessage(`assistant-${Date.now()}`, {
             role: "assistant",
@@ -352,13 +445,9 @@ export default function App() {
             kind: "text",
           });
         } else {
-          let reply = "All done! The CadQuery model is ready — rotate it in the viewport and download exports.";
-          if (data.clarifiedPrompt) {
-            reply += `\n\nFinal description:\n${data.clarifiedPrompt}`;
-          }
           upsertChatMessage(`pipeline-complete-${Date.now()}`, {
             role: "assistant",
-            content: reply,
+            content: doneMsg,
             kind: "text",
           });
         }
@@ -401,17 +490,10 @@ export default function App() {
     const runId = pipelineRunIdRef.current;
     upsertChatMessage(`pipeline-header-${runId}`, {
       role: "assistant",
-      content: "Generating via standard API (stream unavailable, fallback mode)…",
+      content: "Generating 3D model…",
       kind: "pipeline_header",
-      pipelineSteps: [
-        "Drawing Spec Extract",
-        "Vision & Prompt Merge",
-        "Clarifier",
-        "Coder",
-        "Sandbox Export",
-      ],
     });
-    setPipelineStatusLabel("Generating (fallback mode)…");
+    setPipelineStatusLabel("Generating…");
 
     const response = await fetch("/api/procad/generate", {
       method: "POST",
@@ -421,6 +503,7 @@ export default function App() {
         image,
         imageType: mimeType,
         sessionId: sessionId || undefined,
+        pipelineMethod,
       }),
     });
     const data = await response.json();
@@ -429,19 +512,12 @@ export default function App() {
     }
 
     if (data.iterations?.length) {
-      for (let i = 0; i < data.iterations.length; i++) {
-        const it = data.iterations[i];
-        setIterations((prev) => [...prev, it]);
-        setActiveIterationIndex(i);
-        upsertChatMessage(`pipeline-step-${runId}-${it.attempt}`, {
-          role: "assistant",
-          content: it.logs || it.stepName,
-          kind: "pipeline_step",
-          stepIndex: it.attempt,
-          stepName: it.stepName,
-          stepStatus: it.status === "success" ? "success" : "error",
-        });
-        await new Promise((r) => setTimeout(r, 200));
+      setIterations(data.iterations);
+      setActiveIterationIndex(data.iterations.length - 1);
+      const last = data.iterations[data.iterations.length - 1];
+      if (last?.code) {
+        setCadCode(last.code);
+        setCadParams(extractCadParams(last.code));
       }
     }
 
@@ -449,7 +525,7 @@ export default function App() {
     if (data.success) {
       upsertChatMessage(`pipeline-complete-${Date.now()}`, {
         role: "assistant",
-        content: `Generation complete.${data.clarifiedPrompt ? `\n\n${data.clarifiedPrompt}` : ""}`,
+        content: "Generation complete.",
         kind: "text",
       });
     } else {
@@ -463,16 +539,23 @@ export default function App() {
     mimeType?: string,
     sessionId?: string | null
   ) => {
+    archiveWorkspaceHistory(activeExampleId, snapshotWorkspace());
+    refreshWorkspaceHistory(activeExampleId);
+
     pipelineRunIdRef.current = Date.now();
     setIsPipelineRunning(true);
     setIsChatResponding(true);
     setIterations([]);
     setActiveIterationIndex(0);
     setGlbUrl(null);
+    setModelPreviews([]);
+    setActivePreviewId(null);
     setPipelineActiveStep(1);
-    setPipelineStatusLabel("Starting pipeline…");
+    setPipelineStatusLabel("Generating…");
     setChatHistory([]);
     setDrawingSpec(null);
+    setCadCode(null);
+    setCadParams([]);
     appendChatMessage("user", prompt, image);
 
     try {
@@ -481,6 +564,7 @@ export default function App() {
         image,
         imageType: mimeType,
         sessionId: sessionId || undefined,
+        pipelineMethod,
       });
     } catch (streamErr) {
       console.warn("Stream API failed, falling back:", streamErr);
@@ -559,7 +643,7 @@ export default function App() {
 
       try {
         await runProcadGenerateCore(
-          ex.defaultPrompt,
+          effectiveGeneratePrompt(ex.defaultPrompt, Boolean(imageData)),
           imageData,
           mimeType,
           null
@@ -737,16 +821,43 @@ export default function App() {
     setChatHistory((prev) => [...prev, newMsg]);
   };
 
+  const restoreHistoryEntry = async (entry: WorkspaceHistoryEntry) => {
+    applyWorkspaceState(entry.workspace);
+    if (entry.workspace.procadSessionId) {
+      try {
+        const resp = await fetch(`/api/procad/session/${entry.workspace.procadSessionId}`);
+        const data = await resp.json();
+        if (data.success) {
+          applyProcadResult(data);
+          if (data.glbUrl) {
+            const bust = "?t=" + Date.now();
+            upsertModelPreview({
+              id: "final",
+              label: "Restored model",
+              glbUrl: (data.glbUrl as string) + bust,
+            });
+          }
+        }
+      } catch {
+        /* keep local restore */
+      }
+    }
+    appendChatMessage(
+      "assistant",
+      `Restored session from ${new Date(entry.savedAt).toLocaleString()}.`
+    );
+  };
+
   const selectedExample = findResolvedExample(selectedExampleId);
   const activeExample = findResolvedExample(activeExampleId);
   const partTypeOptions = Array.from(
-    new Set(DRAWING_EXAMPLES.map((ex) => ex.partType))
+    new Set(resolvedExamples.map((ex) => ex.partType))
   );
 
   const navResize = useResizeWidth(245, 200, 360);
   const dashboardDetailResize = useResizeWidth(340, 260, 520);
   const reconstructLeftResize = useResizeWidth(300, 220, 480);
-  const reconstructRightResize = useResizeWidth(320, 260, 520);
+  const reconstructRightResize = useResizeWidth(420, 320, 640);
 
   return (
     <div className="h-screen overflow-hidden bg-[#f8fafc] text-slate-700 flex font-sans select-none antialiased">
@@ -755,9 +866,9 @@ export default function App() {
         <aside className="w-full bg-white border-r border-slate-200 flex flex-col h-full min-h-0">
         {/* Brand header */}
         <div className="p-4 border-b border-slate-205 flex items-center gap-3">
-          <CADConverterLogo />
+          <WonderCADLogo />
           <div className="flex flex-col text-left min-w-0">
-            <span className="text-[15px] font-extrabold text-slate-800 leading-tight tracking-tight">CAD Converter</span>
+            <span className="text-[15px] font-extrabold text-slate-800 leading-tight tracking-tight">WonderCAD</span>
             <span className="text-[10px] text-slate-400 font-medium leading-snug mt-0.5">From 2D drawing to 3D model</span>
           </div>
         </div>
@@ -838,44 +949,7 @@ export default function App() {
                 </button>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-                <div className="bg-white border border-slate-200.5 p-4.5 rounded-xl shadow-3xs flex justify-between items-start text-left">
-                  <div className="space-y-1.5 min-w-0">
-                    <span className="text-[11px] font-bold text-slate-400 tracking-wider uppercase font-mono">Example Drawings</span>
-                    <p className="text-2.5xl font-extrabold text-slate-850 tracking-tight leading-none font-sans">{DRAWING_EXAMPLES.length}</p>
-                    <span className="text-[10px] font-semibold text-slate-500">From wondercad/example/</span>
-                  </div>
-                  <div className="p-2 border border-slate-100 bg-slate-50 rounded-lg text-slate-500">
-                    <Folder className="w-5 h-5 text-orange-600" />
-                  </div>
-                </div>
-
-                <div className="bg-white border border-slate-200.5 p-4.5 rounded-xl shadow-3xs flex justify-between items-start text-left">
-                  <div className="space-y-1.5 min-w-0">
-                    <span className="text-[11px] font-bold text-slate-400 tracking-wider uppercase font-mono">With 2D Drawing</span>
-                    <p className="text-2.5xl font-extrabold text-slate-850 tracking-tight leading-none font-sans">
-                      {DRAWING_EXAMPLES.filter((e) => e.imageUrl).length}
-                    </p>
-                    <span className="text-[10px] font-semibold text-slate-500">PNG / JPG reference images</span>
-                  </div>
-                  <div className="p-2 border border-slate-100 bg-slate-50 rounded-lg text-slate-500">
-                    <FileImage className="w-5 h-5 text-orange-600" />
-                  </div>
-                </div>
-
-                <div className="bg-white border border-slate-200.5 p-4.5 rounded-xl shadow-3xs flex justify-between items-start text-left">
-                  <div className="space-y-1.5 min-w-0">
-                    <span className="text-[11px] font-bold text-slate-400 tracking-wider uppercase font-mono">Pipeline</span>
-                    <p className="text-2.5xl font-extrabold text-slate-850 tracking-tight leading-none font-sans">Pro-CAD</p>
-                    <span className="text-[10px] font-semibold text-emerald-600 flex items-center gap-1">
-                      Clarify → CadQuery → GLB
-                    </span>
-                  </div>
-                  <div className="p-2 border border-slate-100 bg-slate-50 rounded-lg text-slate-500">
-                    <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-                  </div>
-                </div>
-              </div>
+              <DashboardStats stats={dashboardStats} />
 
               {/* SEARCH AND FILTERS TOOLBAR */}
               <div className="bg-white border border-slate-200 rounded-xl p-3 mb-4.5 flex flex-wrap gap-3 items-center justify-between text-xs">
@@ -999,7 +1073,9 @@ export default function App() {
                 <div className="space-y-2">
                   <h3 className="text-[10.5px] font-bold text-slate-400 font-mono tracking-wider uppercase">Default Prompt</h3>
                   <p className="text-[11px] text-slate-600 leading-relaxed bg-slate-50 border border-slate-200 rounded-lg p-3">
-                    {selectedExample.defaultPrompt}
+                    {selectedExample.defaultPrompt.trim() || (
+                      <span className="text-slate-400 italic">Empty — uses drawing-only prompt when generating</span>
+                    )}
                   </p>
                 </div>
 
@@ -1018,7 +1094,10 @@ export default function App() {
                         const loaded = await loadExample(selectedExampleId, true);
                         if (loaded) {
                           handleProcadGenerate(
-                            loaded.example.defaultPrompt,
+                            effectiveGeneratePrompt(
+                              loaded.example.defaultPrompt,
+                              Boolean(loaded.preview)
+                            ),
                             loaded.preview || undefined
                           );
                         }
@@ -1057,7 +1136,32 @@ export default function App() {
                 </span>
               </div>
 
-              {/* Status convergence tag */}
+              <div className="flex items-center gap-3 shrink-0">
+                <div className="flex items-center gap-2">
+                  <label
+                    htmlFor="reconstruct-pipeline-method"
+                    className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-wider"
+                  >
+                    Pipeline
+                  </label>
+                  <select
+                    id="reconstruct-pipeline-method"
+                    value={pipelineMethod}
+                    onChange={(e) => {
+                      const method = e.target.value as PipelineMethod;
+                      setPipelineMethod(method);
+                      savePipelineMethod(method);
+                    }}
+                    className="text-[11px] font-sans text-slate-700 border border-slate-200 rounded-lg px-2 py-1 bg-white focus:outline-none focus:border-orange-500 cursor-pointer max-w-[220px]"
+                  >
+                    {PIPELINE_METHOD_ORDER.map((method) => (
+                      <option key={method} value={method}>
+                        {PIPELINE_METHOD_LABELS[method].title}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="h-4 w-px bg-slate-200" />
               {glbUrl && (
                 <div className="bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-full flex items-center gap-1.5 text-[11px] font-bold text-emerald-800 shadow-2xs">
                   <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 inline-block" />
@@ -1070,6 +1174,7 @@ export default function App() {
                   <span>Click Generate 3D Model to reconstruct this drawing</span>
                 </div>
               )}
+              </div>
             </div>
 
             {/* Split panels grid identical to initial CAD agent workspace */}
@@ -1095,7 +1200,19 @@ export default function App() {
 
               <div className="flex-1 min-w-0 flex flex-col gap-2 overflow-hidden min-h-0 px-3">
                 <div className="flex-[5] min-h-0 flex flex-col">
-                  {glbUrl ? (
+                  {modelPreviews.length > 0 ? (
+                    <MultiModelViewport
+                      previews={modelPreviews}
+                      activeId={activePreviewId}
+                      onSelect={setActivePreviewId}
+                      downloadUrls={{
+                        glbUrl,
+                        stlUrl,
+                        stepUrl,
+                        pyUrl,
+                      }}
+                    />
+                  ) : glbUrl ? (
                     <GLBViewer
                       glbUrl={glbUrl}
                       stlUrl={stlUrl || undefined}
@@ -1124,14 +1241,6 @@ export default function App() {
                     <LoopConsole
                       iterations={iterations}
                       isPipelineRunning={isPipelineRunning}
-                      onTriggerRebuild={() => {
-                        if (promptText.trim()) {
-                          handleProcadGenerate(
-                            promptText.trim(),
-                            examplePreviewUrl || undefined
-                          );
-                        }
-                      }}
                       activeIterationIndex={activeIterationIndex}
                       setActiveIterationIndex={setActiveIterationIndex}
                     />
@@ -1171,6 +1280,8 @@ export default function App() {
                   isChatResponding={isChatResponding}
                   pipelineActiveStep={pipelineActiveStep}
                   pipelineRunning={isPipelineRunning}
+                  historyEntries={workspaceHistory}
+                  onRestoreHistory={restoreHistoryEntry}
                 />
               </div>
 
@@ -1191,7 +1302,79 @@ export default function App() {
 
               <div className="space-y-4 text-xs font-sans">
                 <div className="space-y-1.5">
-                  <label className="block text-slate-450 font-bold font-mono tracking-wider uppercase text-[10px]">TOLERANCE THRESHOLD</label>
+                  <label className="block text-slate-450 font-bold font-mono tracking-wider uppercase text-[10px]">
+                    Pipeline Method
+                  </label>
+                  <select
+                    value={pipelineMethod}
+                    onChange={(e) => {
+                      const method = e.target.value as PipelineMethod;
+                      setPipelineMethod(method);
+                      savePipelineMethod(method);
+                    }}
+                    className="w-full p-2.5 bg-white border border-slate-200 rounded-lg font-sans text-slate-700 text-sm focus:outline-none focus:border-orange-500 cursor-pointer"
+                  >
+                    {PIPELINE_METHOD_ORDER.map((method) => (
+                      <option key={method} value={method}>
+                        {PIPELINE_METHOD_LABELS[method].title}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-slate-500 leading-relaxed">
+                    {PIPELINE_METHOD_LABELS[pipelineMethod].description}
+                  </p>
+                  <div className="mt-2 p-2.5 bg-slate-50 border border-slate-100 rounded-lg">
+                    <p className="text-[10px] font-bold font-mono uppercase tracking-wider text-slate-400 mb-1.5">
+                      Pipeline steps (with drawing)
+                    </p>
+                    <ol className="text-[11px] text-slate-600 space-y-0.5 list-decimal list-inside">
+                      {pipelineStepsForMethod(pipelineMethod, true).map((step) => (
+                        <li key={step}>{step}</li>
+                      ))}
+                    </ol>
+                  </div>
+                </div>
+
+                {pipelineMethod === "v4" && (
+                  <div className="space-y-3 p-3.5 bg-orange-50/60 border border-orange-100 rounded-lg">
+                    <p className="text-[10px] font-bold font-mono uppercase tracking-wider text-orange-700">
+                      V4 Visual Validation Settings
+                    </p>
+                    <div className="space-y-1.5">
+                      <label className="block text-slate-450 font-bold font-mono tracking-wider uppercase text-[10px]">
+                        {V4_SETTINGS_INFO.visualValidationAttempts.label}
+                      </label>
+                      <input
+                        type="text"
+                        disabled
+                        value={`${V4_SETTINGS_INFO.visualValidationAttempts.defaultValue} (env: ${V4_SETTINGS_INFO.visualValidationAttempts.envKey})`}
+                        className="w-full p-2 bg-[#f8fafc] border border-slate-200 rounded-lg font-sans text-slate-500 font-medium"
+                      />
+                      <p className="text-[10px] text-slate-500 leading-relaxed">
+                        {V4_SETTINGS_INFO.visualValidationAttempts.description}
+                      </p>
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="block text-slate-450 font-bold font-mono tracking-wider uppercase text-[10px]">
+                        {V4_SETTINGS_INFO.visualValidationMinScore.label}
+                      </label>
+                      <input
+                        type="text"
+                        disabled
+                        value={`${V4_SETTINGS_INFO.visualValidationMinScore.defaultValue} (env: ${V4_SETTINGS_INFO.visualValidationMinScore.envKey})`}
+                        className="w-full p-2 bg-[#f8fafc] border border-slate-200 rounded-lg font-sans text-slate-500 font-medium"
+                      />
+                      <p className="text-[10px] text-slate-500 leading-relaxed">
+                        {V4_SETTINGS_INFO.visualValidationMinScore.description}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                <div className="space-y-1.5">
+                  <label className="block text-slate-450 font-bold font-mono tracking-wider uppercase text-[10px]">
+                    Tolerance Threshold
+                  </label>
                   <input type="text" disabled value="0.05 mm (High Precision Calipers)" className="w-full p-2 bg-[#f8fafc] border border-slate-200 rounded-lg font-sans text-slate-500 font-medium" />
                 </div>
 

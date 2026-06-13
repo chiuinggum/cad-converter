@@ -9,6 +9,9 @@ interface GLBViewerProps {
   stlUrl?: string;
   stepUrl?: string;
   pyUrl?: string;
+  compact?: boolean;
+  hideDownloads?: boolean;
+  title?: string;
 }
 
 function fitCameraToObject(
@@ -42,6 +45,9 @@ export const GLBViewer: React.FC<GLBViewerProps> = ({
   stlUrl,
   stepUrl,
   pyUrl,
+  compact = false,
+  hideDownloads = false,
+  title = "3D MODEL (CadQuery)",
 }) => {
   const mountRef = useRef<HTMLDivElement>(null);
 
@@ -200,28 +206,38 @@ export const GLBViewer: React.FC<GLBViewerProps> = ({
   };
 
   return (
-    <div className="border border-slate-200 rounded-xl bg-white shadow-sm flex flex-col h-full max-h-full overflow-hidden relative min-h-0">
-      <div className="p-2.5 border-b border-slate-200 flex items-center justify-between bg-white shrink-0">
-        <div className="flex items-center gap-2">
-          <Box className="w-4 h-4 text-orange-600" />
-          <h2 className="text-sm font-semibold text-slate-800 tracking-wide font-sans uppercase">
-            3D MODEL (CadQuery)
-          </h2>
+    <div
+      className={`bg-white flex flex-col h-full max-h-full overflow-hidden relative min-h-0 ${
+        compact ? "" : "border border-slate-200 rounded-xl shadow-sm"
+      }`}
+    >
+      {!compact && (
+        <div className="p-2.5 border-b border-slate-200 flex items-center justify-between bg-white shrink-0">
+          <div className="flex items-center gap-2">
+            <Box className="w-4 h-4 text-orange-600" />
+            <h2 className="text-sm font-semibold text-slate-800 tracking-wide font-sans uppercase">
+              {title}
+            </h2>
+          </div>
+          {!hideDownloads && (
+            <div className="flex items-center gap-1.5">
+              {downloadLink("GLB", glbUrl)}
+              {downloadLink("STL", stlUrl)}
+              {downloadLink("STEP", stepUrl)}
+              {downloadLink("PY", pyUrl)}
+            </div>
+          )}
         </div>
-        <div className="flex items-center gap-1.5">
-          {downloadLink("GLB", glbUrl)}
-          {downloadLink("STL", stlUrl)}
-          {downloadLink("STEP", stepUrl)}
-          {downloadLink("PY", pyUrl)}
-        </div>
-      </div>
+      )}
       <div
         ref={mountRef}
-        className="flex-1 min-h-0 cursor-grab active:cursor-grabbing"
+        className={`flex-1 min-h-0 cursor-grab active:cursor-grabbing ${compact ? "min-h-[140px]" : ""}`}
       />
-      <div className="px-3 py-1.5 border-t border-slate-100 bg-slate-50 text-[9px] text-slate-400 font-mono shrink-0">
-        Drag: rotate · Right-drag / Shift+drag: pan · Scroll: zoom
-      </div>
+      {!compact && (
+        <div className="px-3 py-1.5 border-t border-slate-100 bg-slate-50 text-[9px] text-slate-400 font-mono shrink-0">
+          Drag: rotate · Right-drag / Shift+drag: pan · Scroll: zoom
+        </div>
+      )}
     </div>
   );
 };

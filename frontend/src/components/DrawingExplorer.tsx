@@ -1,9 +1,10 @@
 import React, { useState, useRef } from "react";
 import { Upload, FileImage, Layers, RefreshCw, Sparkles } from "lucide-react";
+import { effectiveGeneratePrompt } from "../data/examples";
 
 interface DrawingExplorerProps {
   drawingTitle?: string;
-  onCustomImageUploaded: (base64Image: string, mimeType: string) => void;
+  onCustomImageUploaded: (base64Image: string, mimeType: string, fileName: string) => void;
   onProcadGenerate: (prompt: string, image?: string, mimeType?: string) => void;
   examplePreviewUrl: string | null;
   isPerceiving: boolean;
@@ -41,6 +42,8 @@ export const DrawingExplorer: React.FC<DrawingExplorerProps> = ({
           ? "image/png"
           : undefined;
 
+  const canGenerate = Boolean(promptText.trim() || previewForGenerate);
+
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(true);
@@ -61,7 +64,7 @@ export const DrawingExplorer: React.FC<DrawingExplorerProps> = ({
       const base64 = e.target?.result as string;
       setCustomPreview(base64);
       setCustomMime(file.type);
-      onCustomImageUploaded(base64, file.type);
+      onCustomImageUploaded(base64, file.type, file.name);
     };
     reader.readAsDataURL(file);
   };
@@ -104,15 +107,15 @@ export const DrawingExplorer: React.FC<DrawingExplorerProps> = ({
           <textarea
             value={promptText}
             onChange={(e) => onPromptChange(e.target.value)}
-            placeholder="Describe the 3D part: dimensions, features, extrusion direction..."
+            placeholder="Optional — describe features, dimensions, or leave blank when a drawing is attached"
             className="w-full h-[72px] text-xs font-sans p-3 rounded-lg border border-slate-200 bg-slate-50 focus:bg-white focus:border-orange-400 focus:ring-1 focus:ring-orange-200 outline-none resize-none"
           />
           <button
             type="button"
-            disabled={!promptText.trim() || isPipelineRunning}
+            disabled={!canGenerate || isPipelineRunning}
             onClick={() =>
               onProcadGenerate(
-                promptText.trim(),
+                effectiveGeneratePrompt(promptText, Boolean(previewForGenerate)),
                 previewForGenerate,
                 previewForGenerate ? previewMime : undefined
               )
@@ -129,8 +132,8 @@ export const DrawingExplorer: React.FC<DrawingExplorerProps> = ({
               <Sparkles className="w-4 h-4" />
             )}
             {isPipelineRunning
-              ? pipelineStatusLabel || "Generating…"
-              : "Generate 3D Model (Pro-CAD)"}
+              ? "Generating…"
+              : "Generate 3D Model"}
           </button>
         </div>
 
