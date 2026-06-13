@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "drawing-understanding-agent"
+version = "0.1.0"
+description = "Extract structured mechanical drawing information from images."
+requires-python = ">=3.10"
+dependencies = [
+    "google-genai",
+    "pydantic>=2",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[project.scripts]
+understand-drawing = "drawing_agent.cli:main"
+review-drawing-spec = "drawing_agent.review_cli:main"
+refine-drawing-spec = "drawing_agent.refine_cli:main"
+run-drawing-agent = "drawing_agent.run_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

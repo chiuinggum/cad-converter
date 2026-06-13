@@ -1,0 +1,8 @@
+Example
+
+```bash
+run-drawing-agent \
+  path_to/cad-converter/examples/shoulder_spacer.png \
+  --output-root path_to/cad-converter/outputs/shoulder_spacer_run \
+  --max-iterations 5
+```
