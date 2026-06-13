@@ -12,6 +12,8 @@ import { SpecPanel } from "./components/SpecPanel";
 import { DrawingSpecPanel, DrawingSpecData } from "./components/DrawingSpecPanel";
 import { DashboardLibrary, BatchProgress } from "./components/DashboardLibrary";
 import { DashboardStats } from "./components/DashboardStats";
+import { DashboardWorkbench } from "./components/DashboardWorkbench";
+import { RunsView, RunRow } from "./components/RunsView";
 import { extractCadParams, applyCadParamValue } from "./utils/cadParams";
 import { mimeFromAssetPath } from "./utils/exampleAssets";
 import {
@@ -39,6 +41,7 @@ import {
   archiveWorkspaceHistory,
   WorkspaceHistoryEntry,
   countWorkspacesWithResults,
+  loadAllWorkspaces,
 } from "./utils/workspaceStorage";
 import { WonderCADLogo } from "./components/WonderCADLogo";
 import { ResizeHandle } from "./components/ResizeHandle";
@@ -46,11 +49,11 @@ import { useResizeWidth } from "./hooks/useResize";
 import { 
   CheckCircle2, Search, ChevronDown, SlidersHorizontal, 
   ChevronLeft, Maximize2, Settings, Laptop, Play,
-  LayoutDashboard, Activity, Info
+  LayoutDashboard, Activity, Info, Boxes, FolderOpen, ListChecks
 } from "lucide-react";
 
 export default function App() {
-  const [activeView, setActiveView] = useState<"dashboard" | "reconstruct" | "settings">("dashboard");
+  const [activeView, setActiveView] = useState<"dashboard" | "reconstruct" | "runs" | "settings">("dashboard");
   
   const [selectedExampleId, setSelectedExampleId] = useState<string>(DRAWING_EXAMPLES[0].id);
   const [searchTerm, setSearchTerm] = useState<string>("");
@@ -113,6 +116,42 @@ export default function App() {
     const importedCount = fileIds.filter((id) => importedIds.has(id)).length;
     return { totalFiles, folderCount, withResults, importedCount };
   }, [exampleLibrary, workspaceTick]);
+
+  // Runs view rows, derived from real stored workspaces (no fabricated metrics).
+  const runsData: RunRow[] = useMemo(() => {
+    const all = loadAllWorkspaces();
+    return resolvedExamples.map((ex) => {
+      const ws = all[ex.id];
+      const iters = ws?.iterations ?? [];
+      const latest = [...iters]
+        .reverse()
+        .find((it) => it.comparison && it.comparison.length);
+      const comp = latest?.comparison ?? [];
+      const dimsPass = comp.filter((c) => c.ok).length;
+      const accuracy = comp.length
+        ? Math.round((dimsPass / comp.length) * 100)
+        : null;
+      const status: RunRow["status"] = ws?.glbUrl
+        ? "success"
+        : iters.length
+          ? "failed"
+          : "none";
+      const hist = loadWorkspaceHistory(ex.id);
+      return {
+        id: ex.id,
+        name: ex.name,
+        partType: ex.partType,
+        imageUrl: ex.imageUrl,
+        status,
+        accuracy,
+        iterations: iters.length,
+        dimsPass,
+        dimsTotal: comp.length,
+        lastRun: hist[0]?.savedAt ?? null,
+        recent: hist.slice(0, 4).map((h) => ({ savedAt: h.savedAt, label: h.label })),
+      };
+    });
+  }, [resolvedExamples, workspaceTick]);
 
   const handleLibraryChange = (patch: Partial<ExampleLibraryState>) => {
     setExampleLibrary((prev) => {
@@ -330,6 +369,37 @@ export default function App() {
     setExamplePreviewUrl(base64Image);
     setPromptText(entry.defaultPrompt);
     setActiveView("reconstruct");
+    appendChatMessage("user", `Uploaded reference drawing: ${entry.name}`, base64Image);
+  };
+
+  // Same as handleCustomImageUploaded but keeps the user on the dashboard.
+  const handleDashboardUploadImage = (
+    base64Image: string,
+    mimeType: string,
+    fileName: string
+  ) => {
+    const entry = createCustomEntry(fileName, base64Image, mimeType);
+    const nextLibrary = addCustomEntryToLibrary(exampleLibrary, entry);
+    setExampleLibrary(nextLibrary);
+    saveExampleLibrary(nextLibrary);
+
+    setSelectedExampleId(entry.id);
+    setActiveExampleId(entry.id);
+    refreshWorkspaceHistory(entry.id);
+    setExamplePreviewUrl(base64Image);
+    setPromptText(entry.defaultPrompt);
+    // Reset any previous result so the panels reflect the new drawing.
+    setGlbUrl(null);
+    setStlUrl(null);
+    setStepUrl(null);
+    setPyUrl(null);
+    setCadCode(null);
+    setCadParams([]);
+    setDrawingSpec(null);
+    setIterations([]);
+    setActiveIterationIndex(0);
+    setModelPreviews([]);
+    setProcadSessionId(null);
     appendChatMessage("user", `Uploaded reference drawing: ${entry.name}`, base64Image);
   };
 
@@ -642,6 +712,62 @@ export default function App() {
     }
   };
 
+  // Dashboard workbench: run reconstruction without leaving the dashboard view.
+  const handleDashboardGenerate = async () => {
+    try {
+      const example = findResolvedExample(selectedExampleId);
+      if (!example) return;
+      await loadExample(selectedExampleId, false);
+
+      // Resolve the drawing image directly — loadExample's returned preview can be
+      // null for a saved workspace, which would silently drop the image and make the
+      // model hallucinate an unrelated part.
+      let image: string | undefined;
+      if (example.imageUrl) {
+        image = example.imageUrl.startsWith("data:")
+          ? example.imageUrl
+          : (await fetchExamplePreview(example.imageUrl)) || undefined;
+      }
+      const mimeType = mimeFromAssetPath(example.relativePath || "");
+
+      await runProcadGenerateCore(
+        effectiveGeneratePrompt(example.defaultPrompt, Boolean(image)),
+        image,
+        image ? mimeType : undefined,
+        null
+      );
+    } catch (err) {
+      console.error("Dashboard reconstruction failed:", err);
+      setIsPipelineRunning(false);
+      setIsChatResponding(false);
+      setPipelineActiveStep(null);
+      setPipelineStatusLabel("");
+      const msg = err instanceof Error ? err.message : String(err);
+      appendChatMessage("assistant", `Reconstruction failed: ${msg}`);
+    }
+  };
+
+  // Dashboard workbench: re-execute the current CadQuery code with edited params.
+  const handleUpdateModel = async () => {
+    if (!cadCode || !procadSessionId) return;
+    setIsReexecuting(true);
+    try {
+      const response = await fetch("/api/procad/reexecute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: procadSessionId, code: cadCode }),
+      });
+      const data = await response.json();
+      if (response.ok && data.success) {
+        applyProcadResult(data);
+      }
+    } catch (err) {
+      console.error("Update model failed:", err);
+    } finally {
+      setIsReexecuting(false);
+    }
+  };
+
   const runFolderBatch = async (folderId: string) => {
     if (batchProgress) return;
     const folder = exampleLibrary.folders.find((f) => f.id === folderId);
@@ -896,265 +1022,168 @@ export default function App() {
     new Set(resolvedExamples.map((ex) => ex.partType))
   );
 
-  const navResize = useResizeWidth(245, 200, 360);
   const dashboardDetailResize = useResizeWidth(340, 260, 520);
   const reconstructLeftResize = useResizeWidth(300, 220, 480);
   const reconstructRightResize = useResizeWidth(420, 320, 640);
 
+  // Latest dimension comparison → rail "AI diff" validation status.
+  const railComparison =
+    [...iterations].reverse().find((it) => it.comparison && it.comparison.length)
+      ?.comparison ?? [];
+  const railDimsOut = railComparison.filter((c) => !c.ok).length;
+  const railHasValidation = railComparison.length > 0;
+
   return (
     <div className="h-screen overflow-hidden bg-[#f8fafc] text-slate-700 flex font-sans select-none antialiased">
       
-      <div className="flex shrink-0 h-full" style={{ width: navResize.width }}>
-        <aside className="w-full bg-white border-r border-slate-200 flex flex-col h-full min-h-0">
-        {/* Brand header */}
-        <div className="p-4 border-b border-slate-205 flex items-center gap-3">
-          <WonderCADLogo />
-          <div className="flex flex-col text-left min-w-0">
-            <span className="text-[15px] font-extrabold text-slate-800 leading-tight tracking-tight">WonderCAD</span>
-            <span className="text-[10px] text-slate-400 font-medium leading-snug mt-0.5">From 2D drawing to 3D model</span>
-          </div>
+      {/* Left icon rail */}
+      <aside className="shrink-0 w-14 bg-slate-900 flex flex-col items-center py-3 h-full">
+        <div className="h-9 w-9 rounded-lg bg-orange-600 flex items-center justify-center text-white font-black text-lg mb-6 shadow-sm select-none">
+          K
         </div>
 
-        {/* Sidebar Navigation */}
-        <nav className="p-3 flex-1 flex flex-col gap-1 text-left">
-          <button 
+        <nav className="flex flex-1 flex-col items-center gap-1.5">
+          <button
             onClick={() => setActiveView("dashboard")}
-            className={`flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-xs font-semibold tracking-wide transition cursor-pointer ${
+            title="Dashboard"
+            className={`flex h-10 w-10 items-center justify-center rounded-xl transition cursor-pointer ${
               activeView === "dashboard"
-                ? "bg-orange-50 text-orange-700 font-bold border-l-2 border-orange-600"
-                : "text-slate-500 hover:bg-slate-50 hover:text-slate-800"
+                ? "bg-slate-800 text-orange-500"
+                : "text-slate-400 hover:bg-slate-800 hover:text-slate-100"
             }`}
           >
-            <LayoutDashboard className="w-4 h-4" />
-            <span>Dashboard</span>
+            <LayoutDashboard className="w-5 h-5" />
           </button>
 
-          <button 
+          <button
+            type="button"
+            disabled
+            title="Resources (coming soon)"
+            className="flex h-10 w-10 items-center justify-center rounded-xl text-slate-600 cursor-not-allowed"
+          >
+            <Boxes className="w-5 h-5" />
+          </button>
+
+          <button
+            onClick={() => setActiveView("runs")}
+            title="Runs"
+            className={`flex h-10 w-10 items-center justify-center rounded-xl transition cursor-pointer ${
+              activeView === "runs"
+                ? "bg-slate-800 text-orange-500"
+                : "text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+            }`}
+          >
+            <ListChecks className="w-5 h-5" />
+          </button>
+
+          <button
             onClick={() => {
               const saved = getWorkspace(activeExampleId);
               if (saved) applyWorkspaceState(saved);
               setActiveView("reconstruct");
             }}
-            className={`flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-xs font-semibold tracking-wide transition cursor-pointer ${
+            title="Reconstruct"
+            className={`flex h-10 w-10 items-center justify-center rounded-xl transition cursor-pointer ${
               activeView === "reconstruct"
-                ? "bg-orange-50 text-orange-700 font-bold"
-                : "text-slate-500 hover:bg-slate-50 hover:text-slate-800"
+                ? "bg-slate-800 text-orange-500"
+                : "text-slate-400 hover:bg-slate-800 hover:text-slate-100"
             }`}
           >
-            <Activity className="w-4 h-4" />
-            <span>Reconstruct</span>
+            <Activity className="w-5 h-5" />
           </button>
 
-          <button 
+          <button
             onClick={() => setActiveView("settings")}
-            className={`flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-xs font-semibold tracking-wide transition cursor-pointer ${
+            title="Settings"
+            className={`flex h-10 w-10 items-center justify-center rounded-xl transition cursor-pointer ${
               activeView === "settings"
-                ? "bg-orange-50 text-orange-700 font-bold"
-                : "text-slate-500 hover:bg-slate-50 hover:text-slate-800"
+                ? "bg-slate-800 text-orange-500"
+                : "text-slate-400 hover:bg-slate-800 hover:text-slate-100"
             }`}
           >
-            <Settings className="w-4 h-4" />
-            <span>Settings</span>
+            <Settings className="w-5 h-5" />
           </button>
         </nav>
-        </aside>
-        <ResizeHandle onMouseDown={navResize.startResize("right")} />
-      </div>
+
+        <div className="mt-auto flex flex-col items-center gap-2.5 pt-2">
+          {railHasValidation && (
+            <span
+              title={`AI diff: ${railDimsOut} dimension${railDimsOut === 1 ? "" : "s"} out of tolerance`}
+              className={`h-2.5 w-2.5 rounded-full ${
+                railDimsOut === 0 ? "bg-emerald-400" : "bg-amber-400"
+              }`}
+            />
+          )}
+          <span
+            title="Pipeline status"
+            className={`h-2.5 w-2.5 rounded-full ${
+              isPipelineRunning
+                ? "bg-orange-400 animate-pulse"
+                : glbUrl
+                  ? "bg-emerald-400"
+                  : "bg-slate-600"
+            }`}
+          />
+          <div className="h-7 w-7 rounded-full bg-slate-700 text-slate-200 text-[10px] font-bold flex items-center justify-center select-none">
+            WC
+          </div>
+        </div>
+      </aside>
 
       {/* RIGHT MAIN SECTION CONTENT CONTAINER */}
       <div className="flex-1 flex flex-col overflow-hidden min-h-0">
         
-        {/* VIEW 1: PROJECTS & RUNS HISTORY LISTING - Matches uploaded screenshot exactly! */}
+        {/* VIEW 1: DASHBOARD WORKBENCH — single-screen reconstruction cockpit */}
         {activeView === "dashboard" && (
-          <div className="flex-1 flex overflow-hidden h-full">
-            
-            {/* CENTRAL TABLE AND FILTERS CONTAINER */}
-            <div className="flex-1 p-6 flex flex-col overflow-y-auto min-w-0 text-left">
-              
-              {/* Runs Title row with Hackathon badges */}
-              <div className="flex items-center justify-between mb-5">
-                <div className="flex items-center gap-2">
-                  <h1 className="text-2xl font-black text-slate-805 tracking-tight font-sans">Dashboard</h1>
-                  <span className="text-xs text-slate-400 font-sans mt-1.5 font-medium">v0.1</span>
-                  <span className="ml-2.5 text-[10px] uppercase font-mono font-bold tracking-widest text-slate-500 border border-slate-200 bg-white rounded px-2 py-0.5 shadow-3xs">
-                    Hackathon Demo
-                  </span>
-                </div>
-                
-                {/* naranja Orange button for "Run Reconstruction" with play icon */}
-                <button 
-                  onClick={() => loadExample(selectedExampleId, true)}
-                  className="bg-[#ea580c] hover:bg-[#d97706] text-white font-bold text-xs px-4 py-2 rounded-lg shadow-sm flex items-center gap-2 transition cursor-pointer hover:shadow"
-                >
-                  <Play className="w-3.5 h-3.5 fill-current text-white" />
-                  <span>Open in Reconstruct</span>
-                </button>
-              </div>
+          <DashboardWorkbench
+            examples={resolvedExamples}
+            selectedExampleId={selectedExampleId}
+            onSelectExample={handleExampleSelect}
+            example={selectedExample}
+            examplePreviewUrl={
+              selectedExampleId === activeExampleId ? examplePreviewUrl : selectedExample.imageUrl ?? null
+            }
+            drawingSpec={drawingSpec}
+            glbUrl={glbUrl}
+            stlUrl={stlUrl}
+            stepUrl={stepUrl}
+            pyUrl={pyUrl}
+            iterations={iterations}
+            activeIterationIndex={activeIterationIndex}
+            setActiveIterationIndex={setActiveIterationIndex}
+            cadParams={cadParams}
+            onParamChange={handleCadParamChange}
+            isReexecuting={isReexecuting}
+            isPipelineRunning={isPipelineRunning}
+            pipelineActiveStep={pipelineActiveStep}
+            pipelineStatusLabel={pipelineStatusLabel}
+            chatHistory={chatHistory}
+            onSendMessage={handleSendMessage}
+            isChatResponding={isChatResponding}
+            historyEntries={workspaceHistory}
+            onRestoreHistory={restoreHistoryEntry}
+            onRunReconstruction={handleDashboardGenerate}
+            onUpdateModel={handleUpdateModel}
+            onOpenReconstruct={() => loadExample(selectedExampleId, true)}
+            pipelineMethod={pipelineMethod}
+            onPipelineMethodChange={(method) => {
+              setPipelineMethod(method);
+              savePipelineMethod(method);
+            }}
+            onUploadImage={handleDashboardUploadImage}
+          />
+        )}
 
-              <DashboardStats stats={dashboardStats} />
-
-              {/* SEARCH AND FILTERS TOOLBAR */}
-              <div className="bg-white border border-slate-200 rounded-xl p-3 mb-4.5 flex flex-wrap gap-3 items-center justify-between text-xs">
-                <div className="flex flex-wrap items-center gap-2.5 flex-1">
-                  
-                  {/* Search projects */}
-                  <div className="relative w-72">
-                    <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
-                    <input
-                      type="text"
-                      value={searchTerm}
-                      onChange={(e) => setSearchTerm(e.target.value)}
-                      placeholder="Search examples..."
-                      className="w-full pl-9 pr-4 py-2 bg-[#f8fafc] border border-slate-200 rounded-lg text-xs font-sans text-slate-700 placeholder-slate-400 focus:outline-none focus:border-orange-500 focus:bg-white transition"
-                    />
-                  </div>
-
-                  {/* Part Type select */}
-                  <div className="flex items-center gap-2">
-                    <span className="text-slate-400 font-semibold font-mono uppercase text-[10px]">Part Type</span>
-                    <div className="relative">
-                      <select 
-                        value={partTypeFilter}
-                        onChange={(e) => setPartTypeFilter(e.target.value)}
-                        className="appearance-none bg-white border border-slate-200 rounded-lg pl-3 pr-8 py-1.5 font-sans font-medium text-slate-700 focus:outline-none focus:border-orange-500 transition cursor-pointer text-xs"
-                      >
-                        <option value="All">All</option>
-                        {partTypeOptions.map((t) => (
-                          <option key={t} value={t}>{t}</option>
-                        ))}
-                      </select>
-                      <ChevronDown className="absolute right-2.5 top-2.5 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
-                    </div>
-                  </div>
-                </div>
-
-                <button 
-                  onClick={() => {
-                    setSearchTerm("");
-                    setPartTypeFilter("All");
-                  }}
-                  className="flex items-center gap-1.5 border border-slate-200 bg-white rounded-lg px-3 py-1.5 font-sans font-semibold text-slate-600 hover:bg-slate-50 transition cursor-pointer"
-                >
-                  <SlidersHorizontal className="w-3.5 h-3.5 text-slate-500" />
-                  <span>Clear</span>
-                </button>
-              </div>
-
-              {/* CORE PROJECT RECONSTRUCTION JOBS TABLE */}
-              <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-2xs flex-1 flex flex-col justify-between">
-                <DashboardLibrary
-                  library={exampleLibrary}
-                  resolvedExamples={resolvedExamples}
-                  selectedExampleId={selectedExampleId}
-                  searchTerm={searchTerm}
-                  partTypeFilter={partTypeFilter}
-                  batchProgress={batchProgress}
-                  onLibraryChange={handleLibraryChange}
-                  onSelectExample={handleExampleSelect}
-                  onBatchRun={runFolderBatch}
-                  onOpenReconstruct={(id) => loadExample(id, true)}
-                />
-              </div>
-
-            </div>
-
-            <ResizeHandle
-              onMouseDown={dashboardDetailResize.startResize("left")}
-              side="left"
-            />
-            <aside
-              className="bg-white border-l border-slate-200 flex flex-col shrink-0 text-left min-h-0"
-              style={{ width: dashboardDetailResize.width }}
-            >
-              
-              {/* Header Title with Success indicator */}
-              <div className="p-4 border-b border-slate-205 flex items-center justify-between bg-white">
-                <div className="flex flex-col gap-1 min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h2 className="text-sm font-extrabold text-slate-800 font-sans tracking-tight truncate">{selectedExample.name}</h2>
-                    <span className="px-2 py-0.5 rounded text-[9.5px] font-bold bg-orange-100 text-orange-800 border border-orange-200/50 uppercase">Example</span>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-1">
-                  <button onClick={() => loadExample(selectedExampleId, true)} className="p-1 hover:bg-slate-100 rounded text-slate-450 cursor-pointer" title="Open in Reconstruct">
-                    <Maximize2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
-
-              <div className="flex-1 p-4.5 overflow-y-auto space-y-4 text-xs font-sans">
-                <div className="space-y-2">
-                  <h3 className="text-[10.5px] font-bold text-slate-400 font-mono tracking-wider uppercase">Overview</h3>
-                  <div className="bg-[#f8fafc] border border-slate-200 rounded-lg p-3 space-y-2.5 font-sans">
-                    <div className="flex justify-between items-center">
-                      <span className="text-slate-450">Part Type</span>
-                      <span className="font-bold text-slate-800">{selectedExample.partType}</span>
-                    </div>
-                    <div className="flex justify-between items-center">
-                      <span className="text-slate-450">Input Drawing</span>
-                      <span className="font-mono text-[10px] text-slate-600">{selectedExample.inputDrawing}</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <h3 className="text-[10.5px] font-bold text-slate-400 font-mono tracking-wider uppercase">Input Drawing</h3>
-                  <div className="border border-slate-200 rounded-xl overflow-hidden shadow-2xs relative bg-white p-2 min-h-[175px] flex items-center justify-center">
-                    {selectedExample.imageUrl ? (
-                      <img src={selectedExample.imageUrl} alt={selectedExample.name} className="w-full h-auto max-h-[200px] object-contain" />
-                    ) : (
-                      <div className="flex flex-col items-center text-slate-400 p-4">
-                        <FileImage className="w-8 h-8 mb-2" />
-                        <span className="text-[10px] font-mono">No 2D drawing in package (text-only)</span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <h3 className="text-[10.5px] font-bold text-slate-400 font-mono tracking-wider uppercase">Default Prompt</h3>
-                  <p className="text-[11px] text-slate-600 leading-relaxed bg-slate-50 border border-slate-200 rounded-lg p-3">
-                    {selectedExample.defaultPrompt.trim() || (
-                      <span className="text-slate-400 italic">Empty — uses drawing-only prompt when generating</span>
-                    )}
-                  </p>
-                </div>
-
-                <div className="space-y-2">
-                  <h3 className="text-[10.5px] font-bold text-slate-400 font-mono tracking-wider uppercase">Quick Actions</h3>
-                  <div className="grid grid-cols-1 gap-2">
-                    <button 
-                      onClick={() => loadExample(selectedExampleId, true)}
-                      className="w-full flex items-center justify-center gap-2 bg-[#f8fafc] hover:bg-[#f1f5f9] border border-slate-250 py-2.5 rounded-lg font-bold text-slate-750 font-sans tracking-wide transition cursor-pointer active:scale-98 shadow-4xs"
-                    >
-                      <Laptop className="w-4 h-4 text-orange-600" />
-                      <span>Open in Reconstruct</span>
-                    </button>
-                    <button 
-                      onClick={async () => {
-                        const loaded = await loadExample(selectedExampleId, true);
-                        if (loaded) {
-                          handleProcadGenerate(
-                            effectiveGeneratePrompt(
-                              loaded.example.defaultPrompt,
-                              Boolean(loaded.preview)
-                            ),
-                            loaded.preview || undefined
-                          );
-                        }
-                      }}
-                      className="w-full flex items-center justify-center gap-2 bg-orange-600 hover:bg-orange-700 border border-orange-600 py-2.5 rounded-lg font-bold text-white font-sans tracking-wide transition cursor-pointer active:scale-98 shadow-4xs"
-                    >
-                      <Play className="w-4 h-4" />
-                      <span>Generate 3D Model</span>
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </aside>
-
-          </div>
+        {/* VIEW: RUNS — project/run list driven by stored workspaces */}
+        {activeView === "runs" && (
+          <RunsView
+            runs={runsData}
+            onOpenRun={(id) => {
+              loadExample(id);
+              setActiveView("dashboard");
+            }}
+            onOpenReconstruct={(id) => loadExample(id, true)}
+          />
         )}
 
         {/* VIEW 2: FULLY-FEATURED MULTI-AGENT CAD RECONSTRUCT INTERACTIVE STUDIO WORKBENCH */}

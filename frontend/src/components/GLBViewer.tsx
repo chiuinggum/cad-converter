@@ -68,6 +68,7 @@ export const GLBViewer: React.FC<GLBViewerProps> = ({
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.shadowMap.enabled = true;
+    renderer.autoClear = false; // manual clear so the axis gizmo can overlay
 
     mount.innerHTML = "";
     mount.appendChild(renderer.domElement);
@@ -102,6 +103,34 @@ export const GLBViewer: React.FC<GLBViewerProps> = ({
     const modelGroup = new THREE.Group();
     scene.add(modelGroup);
 
+    // --- Axis gizmo (inset, bottom-left): X red, Y green, Z blue ---
+    const axisScene = new THREE.Scene();
+    const axisCamera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
+    axisScene.add(new THREE.AxesHelper(1));
+    const makeAxisLabel = (text: string, color: string, pos: THREE.Vector3) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 64;
+      const ctx = canvas.getContext("2d")!;
+      ctx.fillStyle = color;
+      ctx.font = "bold 44px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(text, 32, 32);
+      const sprite = new THREE.Sprite(
+        new THREE.SpriteMaterial({
+          map: new THREE.CanvasTexture(canvas),
+          depthTest: false,
+          transparent: true,
+        })
+      );
+      sprite.position.copy(pos);
+      sprite.scale.setScalar(0.45);
+      return sprite;
+    };
+    axisScene.add(makeAxisLabel("X", "#ef4444", new THREE.Vector3(1.3, 0, 0)));
+    axisScene.add(makeAxisLabel("Y", "#22c55e", new THREE.Vector3(0, 1.3, 0)));
+    axisScene.add(makeAxisLabel("Z", "#3b82f6", new THREE.Vector3(0, 0, 1.3)));
+
     let gridHelper: THREE.GridHelper | null = null;
 
     const loader = new GLTFLoader();
@@ -114,6 +143,12 @@ export const GLBViewer: React.FC<GLBViewerProps> = ({
           scene.remove(gridHelper);
           gridHelper = null;
         }
+
+        // CadQuery/trimesh exports are Z-up; three.js (and the GridHelper) are
+        // Y-up. Rotate -90° about X so the part lies flat on the ground grid
+        // instead of standing up / tilting.
+        root.rotation.x = -Math.PI / 2;
+        root.updateMatrixWorld(true);
 
         const box = new THREE.Box3().setFromObject(root);
         const size = box.getSize(new THREE.Vector3());
@@ -163,7 +198,33 @@ export const GLBViewer: React.FC<GLBViewerProps> = ({
     let animationFrameId: number;
     const renderScene = () => {
       controls.update();
+      const w = mount.clientWidth || width;
+      const h = mount.clientHeight || height;
+
+      // Main scene (full viewport).
+      renderer.setViewport(0, 0, w, h);
+      renderer.setScissorTest(false);
+      renderer.clear();
       renderer.render(scene, camera);
+
+      // Axis gizmo inset (top-right), oriented to match the main camera.
+      const inset = 96;
+      const gx = Math.max(0, w - inset - 12);
+      const gy = Math.max(0, h - inset - 12);
+      renderer.setScissorTest(true);
+      renderer.setViewport(gx, gy, inset, inset);
+      renderer.setScissor(gx, gy, inset, inset);
+      renderer.clearDepth();
+      axisCamera.position
+        .copy(camera.position)
+        .sub(controls.target)
+        .normalize()
+        .multiplyScalar(3.2);
+      axisCamera.up.copy(camera.up);
+      axisCamera.lookAt(0, 0, 0);
+      renderer.render(axisScene, axisCamera);
+      renderer.setScissorTest(false);
+
       animationFrameId = requestAnimationFrame(renderScene);
     };
     renderScene();

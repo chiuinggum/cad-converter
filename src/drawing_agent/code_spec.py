@@ -157,6 +157,63 @@ def dimension_diff_pass(rows: list[DimDiffRow]) -> tuple[bool, float]:
     return passed, ratio
 
 
+def measured_values_pool(measured: dict[str, Any]) -> list[float]:
+    """Flatten an independent measurement into a candidate-value pool.
+
+    Prefers the explicit ``_values`` pool produced by
+    :func:`drawing_agent.geometry.measure_solid`; otherwise falls back to every
+    positive numeric scalar in the dict.
+    """
+    pool = measured.get("_values")
+    if pool:
+        return [float(v) for v in pool]
+    values: list[float] = []
+    for value in measured.values():
+        if isinstance(value, (int, float)) and float(value) > 0.05:
+            values.append(float(value))
+    return values
+
+
+def build_dimension_diff_from_measurement(
+    measured: dict[str, Any],
+    drawing_spec: dict[str, Any],
+) -> list[DimDiffRow]:
+    """Diff drawing dimensions against values measured from the built solid.
+
+    Same matching logic as :func:`build_dimension_diff`, but the candidate pool
+    comes from the *actual geometry* (independent measurement) instead of
+    numeric literals scraped from the code. This is what makes the ``measured``
+    column of the validation table truthful.
+    """
+    pool = measured_values_pool(measured)
+    rows: list[DimDiffRow] = []
+    for dim in drawing_spec.get("dimensions") or []:
+        if not dim.get("explicit", True):
+            continue
+        value = dim.get("value")
+        if value is None:
+            continue
+        dim_id = str(dim.get("id") or "dim")
+        dtype = str(dim.get("dimension_type") or "linear")
+        applies = str(dim.get("applies_to") or dim_id)
+        target = float(value)
+        ok = value_found_in_code(target, dtype, pool)
+        closest, error = closest_code_match(target, dtype, pool)
+        rows.append(
+            DimDiffRow(
+                id=dim_id,
+                target=target,
+                dimension_type=dtype,
+                applies_to=applies,
+                closest_code_value=closest,
+                error=0.0 if ok else error,
+                ok=ok,
+                hint=_repair_hint(target, dtype, applies, closest, ok),
+            )
+        )
+    return rows
+
+
 def dimension_diff_to_comparison(rows: list[DimDiffRow]) -> list[dict[str, Any]]:
     return [
         {

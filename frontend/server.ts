@@ -37,6 +37,12 @@ function resolveProcadRoot(): string {
 
 const PROCAD_ROOT = resolveProcadRoot();
 const PROCAD_SERVICE = path.join(FRONTEND_ROOT, "procad_service.py");
+// Hard ceiling on a single pipeline run. Kills hung children (e.g. a runaway
+// CadQuery build) so a request never blocks forever and never leaks a process.
+// Floor the timeout at 10 min: V3/V4 self-correction loops on complex parts can
+// run for several minutes, and a too-small PROCAD_TIMEOUT_MS in the environment
+// would otherwise kill a run that was about to succeed.
+const PROCAD_TIMEOUT_MS = Math.max(Number(process.env.PROCAD_TIMEOUT_MS) || 0, 600000);
 const SESSIONS_DIR = path.join(FRONTEND_ROOT, ".sessions");
 const STORAGE_ROOT = path.join(WONDERCAD_ROOT, ".wondercad-storage");
 const STORAGE_IMPORTS_DIR = path.join(STORAGE_ROOT, "imports");
@@ -94,11 +100,29 @@ function callProcadService(
 
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
+    const killTimer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, PROCAD_TIMEOUT_MS);
+
     child.stdout.on("data", (chunk) => (stdout += chunk.toString()));
     child.stderr.on("data", (chunk) => (stderr += chunk.toString()));
 
-    child.on("error", (err) => reject(err));
+    child.on("error", (err) => {
+      clearTimeout(killTimer);
+      reject(err);
+    });
     child.on("close", (code) => {
+      clearTimeout(killTimer);
+      if (timedOut) {
+        reject(
+          new Error(
+            `procad_service timed out after ${PROCAD_TIMEOUT_MS}ms and was terminated`
+          )
+        );
+        return;
+      }
       if (code !== 0) {
         reject(new Error(stderr || `procad_service exited with code ${code}`));
         return;
@@ -138,6 +162,12 @@ function streamProcadService(
   res.flushHeaders();
 
   let stdoutBuf = "";
+  let timedOut = false;
+  const killTimer = setTimeout(() => {
+    timedOut = true;
+    child.kill("SIGKILL");
+  }, PROCAD_TIMEOUT_MS);
+
   child.stdout.on("data", (chunk) => {
     stdoutBuf += chunk.toString();
     const lines = stdoutBuf.split("\n");
@@ -158,6 +188,7 @@ function streamProcadService(
   });
 
   child.on("error", (err) => {
+    clearTimeout(killTimer);
     res.write(
       `data: ${JSON.stringify({ type: "error", error: err.message })}\n\n`
     );
@@ -165,8 +196,20 @@ function streamProcadService(
   });
 
   child.on("close", (code) => {
+    clearTimeout(killTimer);
     if (stdoutBuf.trim()) {
       res.write(`data: ${stdoutBuf.trim()}\n\n`);
+    }
+    if (timedOut) {
+      res.write(
+        `data: ${JSON.stringify({
+          type: "error",
+          error: `procad_service timed out after ${PROCAD_TIMEOUT_MS}ms and was terminated`,
+        })}\n\n`
+      );
+      res.write(`data: ${JSON.stringify({ type: "end" })}\n\n`);
+      res.end();
+      return;
     }
     if (code !== 0) {
       res.write(
@@ -855,7 +898,7 @@ You must return your reply in structured JSON ONLY, with this schema:
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       root: FRONTEND_ROOT,
-      configFile: path.join(FRONTEND_ROOT, "vite.config.mjs"),
+      configFile: path.join(FRONTEND_ROOT, "vite.config.ts"),
       server: { middlewareMode: true },
       appType: "spa",
     });

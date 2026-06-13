@@ -18,7 +18,7 @@ export const SpecPanel: React.FC<SpecPanelProps> = ({
       <div className="border border-slate-200 rounded-xl bg-white shadow-sm flex flex-col h-full overflow-hidden text-left">
         <div className="p-3 border-b border-slate-200 flex items-center gap-2">
           <Sliders className="w-4 h-4 text-orange-600" />
-          <h2 className="text-sm font-semibold text-slate-800 uppercase tracking-wide">CAD Spec</h2>
+          <h2 className="text-sm font-semibold text-slate-800 uppercase tracking-wide">Parameters</h2>
         </div>
         <div className="flex-1 flex items-center justify-center p-6 text-center text-xs text-slate-500">
           Generate a model to extract editable parameters from CadQuery code.
@@ -32,7 +32,7 @@ export const SpecPanel: React.FC<SpecPanelProps> = ({
       <div className="p-3 border-b border-slate-200 flex items-center justify-between bg-white shrink-0">
         <div className="flex items-center gap-2">
           <Sliders className="w-4 h-4 text-orange-600" />
-          <h2 className="text-sm font-semibold text-slate-800 uppercase tracking-wide">CAD Spec</h2>
+          <h2 className="text-sm font-semibold text-slate-800 uppercase tracking-wide">Parameters</h2>
         </div>
         {isUpdating && (
           <span className="text-[10px] font-mono text-orange-600 flex items-center gap-1">

@@ -75,6 +75,7 @@ CODE_MODEL = os.environ.get("CODE_GEN_MODEL", GEMINI_MODEL)
 MAX_REPAIR_ATTEMPTS = int(os.environ.get("MAX_REPAIR_ATTEMPTS", "5"))
 MAX_SPEC_REPAIR_ATTEMPTS = int(os.environ.get("MAX_SPEC_REPAIR_ATTEMPTS", "5"))
 MAX_SPEC_VALIDATION_ATTEMPTS = int(os.environ.get("MAX_SPEC_VALIDATION_ATTEMPTS", "5"))
+MAX_DIM_REPAIR_ATTEMPTS = int(os.environ.get("MAX_DIM_REPAIR_ATTEMPTS", "3"))
 MAX_VISUAL_VALIDATION_ATTEMPTS = int(os.environ.get("MAX_VISUAL_VALIDATION_ATTEMPTS", "3"))
 MAX_VISUAL_EXEC_REPAIR_ATTEMPTS = int(os.environ.get("MAX_VISUAL_EXEC_REPAIR_ATTEMPTS", "5"))
 VISUAL_VALIDATION_MIN_SCORE = float(os.environ.get("VISUAL_VALIDATION_MIN_SCORE", "0.72"))
@@ -1032,13 +1033,19 @@ def execute_and_export_with_repair(
     code_llm: LLM,
     emit: EmitFn,
     iterations: List[Dict[str, Any]],
+    drawing_spec: Optional[Dict[str, Any]] = None,
 ) -> tuple[str, Optional[str]]:
     repair_round = 0
+    dim_repair_round = 0
     current_code = code
+    # Best (lowest max-error) version seen so far, for graceful degradation.
+    best: Optional[tuple[str, List[Dict[str, Any]], float]] = None
+    dim_repair_history: List[str] = []
 
     while True:
+        attempt_no = repair_round + dim_repair_round
         step_label = (
-            "Execute & Export" if repair_round == 0 else f"Repair Attempt {repair_round}"
+            "Execute & Export" if attempt_no == 0 else f"Repair Attempt {attempt_no}"
         )
         try:
             if repair_round == 0:
@@ -1064,12 +1071,133 @@ def execute_and_export_with_repair(
 
             assets = export_assets(current_code, out_dir)
             prepared = assets["prepared_code"]
-            logs = (
+            measured = assets.get("measured") or {}
+
+            comparison: Optional[List[Dict[str, Any]]] = None
+            dim_diff = None
+            dim_passed = True
+            dim_diff_text = ""
+            measure_summary = ""
+            if drawing_spec and measured and not measured.get("_error"):
+                from drawing_agent.code_spec import (
+                    build_dimension_diff_from_measurement,
+                    dimension_diff_pass,
+                    dimension_diff_to_comparison,
+                    format_dimension_diff_for_repair,
+                )
+
+                dim_diff = build_dimension_diff_from_measurement(measured, drawing_spec)
+                if dim_diff:
+                    comparison = dimension_diff_to_comparison(dim_diff)
+                    ok_count = sum(1 for row in dim_diff if row.ok)
+                    dim_passed, _ = dimension_diff_pass(dim_diff)
+                    max_error = max((row.error for row in dim_diff), default=0.0)
+                    dim_diff_text = format_dimension_diff_for_repair(dim_diff)
+                    measure_summary = (
+                        f"\n[Measure] Independent geometry check: {ok_count}/{len(dim_diff)} "
+                        f"drawing dimensions within tolerance "
+                        f"({'PASS' if dim_passed else 'see failing dims'})."
+                    )
+                    # Track the closest-to-spec version for graceful degradation.
+                    if best is None or max_error < best[2]:
+                        best = (prepared, comparison, max_error)
+
+            exec_log = (
                 "[Sandbox] CadQuery executed successfully.\n[Exporter] STL, GLB, STEP exported."
-                if repair_round == 0
-                else f"[Repair] Attempt {repair_round} fixed execution.\n[Exporter] STL, GLB, STEP exported."
+                if attempt_no == 0
+                else f"[Repair] Attempt {attempt_no} executed.\n[Exporter] STL, GLB, STEP exported."
             )
-            iter_ok = make_iteration(step, step_label, "success", logs, prepared)
+
+            # Dimensional mismatch: feed the failing measured dims back to the
+            # build agent and retry — the loop converges on a real error signal.
+            if dim_diff and not dim_passed:
+                failing_ids = [row.id for row in dim_diff if not row.ok]
+                if dim_repair_round < MAX_DIM_REPAIR_ATTEMPTS:
+                    dim_repair_round += 1
+                    iter_mismatch = make_iteration(
+                        step,
+                        step_label,
+                        "mismatch",
+                        exec_log
+                        + measure_summary
+                        + f"\n[Measure] Dimensional mismatch — repairing "
+                        f"({dim_repair_round}/{MAX_DIM_REPAIR_ATTEMPTS}). "
+                        f"Failing: {failing_ids}",
+                        prepared,
+                        comparison=comparison,
+                        failing=failing_ids,
+                    )
+                    iterations.append(iter_mismatch)
+                    _pipeline_emit(
+                        emit,
+                        {
+                            "type": "step_progress",
+                            "step": step,
+                            "stepName": f"Repair Attempt {repair_round + dim_repair_round}",
+                            "message": (
+                                f"Measured dims off target — repair agent fixing "
+                                f"{failing_ids[:6]} "
+                                f"({dim_repair_round}/{MAX_DIM_REPAIR_ATTEMPTS})…"
+                            ),
+                        },
+                    )
+                    dim_repair_history.append(
+                        f"attempt {dim_repair_round}: still failing {failing_ids[:6]}"
+                    )
+                    try:
+                        current_code = repair_code_for_spec_mismatch(
+                            current_code,
+                            drawing_spec,
+                            {"mismatches": []},
+                            code_llm,
+                            dim_diff_text=dim_diff_text,
+                            repair_history=dim_repair_history,
+                        )
+                        continue
+                    except Exception as repair_exc:
+                        # Could not generate a fix — fall through to degrade.
+                        dim_repair_history.append(f"repair error: {repair_exc}")
+
+                # Budget exhausted (or repair failed): deliver the best version.
+                best_code, best_comparison, _ = best or (prepared, comparison or [], 0.0)
+                if best_code != prepared:
+                    try:
+                        export_assets(best_code, out_dir)  # re-export so files match best
+                    except Exception:
+                        best_code, best_comparison = prepared, comparison or []
+                best_failing = [c["id"] for c in best_comparison if not c["ok"]]
+                iter_degraded = make_iteration(
+                    step,
+                    step_label,
+                    "mismatch",
+                    exec_log
+                    + measure_summary
+                    + f"\n[Measure] Stopped after {MAX_DIM_REPAIR_ATTEMPTS} dimensional "
+                    f"repair attempts — delivering closest version (graceful degradation). "
+                    f"Remaining: {best_failing}",
+                    best_code,
+                    comparison=best_comparison,
+                    failing=best_failing,
+                )
+                iterations.append(iter_degraded)
+                _pipeline_emit(
+                    emit,
+                    {
+                        "type": "step_done",
+                        "step": step,
+                        "iteration": iter_degraded,
+                        "message": (
+                            "Delivered closest model — some dimensions remain out of "
+                            "tolerance (see metrology table)."
+                        ),
+                    },
+                )
+                return best_code, None
+
+            iter_ok = make_iteration(
+                step, step_label, "success", exec_log + measure_summary, prepared,
+                comparison=comparison,
+            )
             iterations.append(iter_ok)
             _pipeline_emit(
                 emit,
@@ -1170,17 +1298,29 @@ def repair_code(code: str, error: str, llm: LLM) -> str:
     )
 
 
-def export_assets(code: str, out_dir: Path) -> Dict[str, str]:
+def export_assets(code: str, out_dir: Path) -> Dict[str, Any]:
     import cadquery as cq
 
+    from src.mesh_utils import cadquery_result_to_mesh
+
+    from drawing_agent.geometry import measure_solid
+
     prepared = prepare_cadquery_code(code)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     namespace: Dict[str, Any] = {"cq": cq}
+    # Executed once here (the previous code exec'd twice). A runaway/hung build
+    # is bounded by the per-request kill-timeout enforced in server.ts.
     exec(prepared, namespace)
     r = namespace.get("r") or namespace.get("result")
     if r is None:
         raise ValueError("Code must define variable r (or result) with CadQuery geometry")
 
-    mesh = cadquery_to_mesh(prepared)
+    solid = r.val()
+    if not solid.isValid():
+        raise ValueError("CadQuery code executed but produced no valid solid")
+
+    mesh = cadquery_result_to_mesh(r)
 
     stl_path = out_dir / "model.stl"
     glb_path = out_dir / "model.glb"
@@ -1193,12 +1333,19 @@ def export_assets(code: str, out_dir: Path) -> Dict[str, str]:
     with open(py_path, "w", encoding="utf-8") as f:
         f.write(prepared)
 
+    # Independent geometric measurement (best-effort; never breaks the export).
+    try:
+        measured = measure_solid(r)
+    except Exception as exc:
+        measured = {"_error": str(exc)}
+
     return {
         "stl": str(stl_path),
         "glb": str(glb_path),
         "step": str(step_path),
         "py": str(py_path),
         "prepared_code": prepared,
+        "measured": measured,
     }
 
 
@@ -1871,7 +2018,7 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
             )
         if not exec_error:
             code, exec_error = execute_and_export_with_repair(
-                code, out_dir, step_sandbox, code_llm, emit, iterations
+                code, out_dir, step_sandbox, code_llm, emit, iterations, drawing_spec
             )
             export_succeeded = exec_error is None
         if (
