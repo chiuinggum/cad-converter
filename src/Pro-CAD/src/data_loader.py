@@ -3,24 +3,82 @@ Data loading utilities for CAD Agent.
 Functions for loading test/train data and filtering samples.
 """
 
+import json
 import os
-import pickle
-from typing import List, Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 
-def load_pickle_data(data_path: str) -> List[Dict]:
+def _normalize_samples(data: Any, data_path: str) -> List[Dict[str, Any]]:
     """
-    Load data from a pickle file.
-    
-    Args:
-        data_path: Path to the pickle file (e.g., test.pkl, train.pkl)
-        
-    Returns:
-        List of sample dictionaries
+    Normalize dataset payloads to a list of sample dictionaries.
     """
-    with open(data_path, 'rb') as f:
-        data = pickle.load(f)
+    if isinstance(data, dict):
+        data = data.get("samples")
+
+    if not isinstance(data, list):
+        raise ValueError(
+            f"Dataset file {data_path} must contain a JSON list or an object with a 'samples' list."
+        )
+
+    if not all(isinstance(sample, dict) for sample in data):
+        raise ValueError(f"Dataset file {data_path} contains non-dictionary samples.")
+
     return data
+
+
+def _resolve_safe_data_path(data_path: str) -> str:
+    """
+    Resolve a dataset path to a JSON file.
+
+    Pickle files are intentionally not loaded because unpickling untrusted data
+    can execute arbitrary code. A legacy `.pkl` path is accepted only when a
+    sibling `.json` file exists and can be used instead.
+    """
+    path = Path(data_path)
+    suffix = path.suffix.lower()
+
+    if suffix == ".json":
+        return str(path)
+
+    if suffix in {".pkl", ".pickle"}:
+        json_path = path.with_suffix(".json")
+        if json_path.exists():
+            return str(json_path)
+        raise ValueError(
+            f"Refusing to load unsafe pickle dataset {data_path}. "
+            f"Convert it to JSON first, or provide {json_path}."
+        )
+
+    raise ValueError(
+        f"Unsupported dataset format for {data_path}. Expected a .json file."
+    )
+
+
+def load_dataset_data(data_path: str) -> List[Dict[str, Any]]:
+    """
+    Load dataset records from a JSON file.
+
+    Args:
+        data_path: Path to a JSON dataset file. If a legacy `.pkl` path is
+            provided, a sibling `.json` file with the same stem is used instead.
+
+    Returns:
+        List of sample dictionaries.
+    """
+    resolved_path = _resolve_safe_data_path(data_path)
+    with open(resolved_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return _normalize_samples(data, resolved_path)
+
+
+def load_pickle_data(data_path: str) -> List[Dict[str, Any]]:
+    """
+    Backward-compatible wrapper for the legacy loader name.
+
+    The implementation is intentionally JSON-only to avoid unsafe unpickling.
+    """
+    return load_dataset_data(data_path)
 
 
 def filter_samples_with_mesh(
@@ -87,7 +145,7 @@ def load_code_file(code_dir: str, uid: str, ext: str = ".py") -> Optional[str]:
     """
     code_path = os.path.join(code_dir, f"{uid}{ext}")
     if os.path.exists(code_path):
-        with open(code_path, 'r') as f:
+        with open(code_path, "r", encoding="utf-8") as f:
             return f.read()
     return None
 
@@ -126,17 +184,18 @@ class Text2CADDataset:
         Initialize the dataset.
         
         Args:
-            data_path: Path to pickle file (test.pkl or train.pkl)
+            data_path: Path to dataset JSON file. Legacy `.pkl` paths are only
+                accepted when a same-name `.json` file exists alongside them.
             mesh_dir: Directory containing ground truth mesh files
             code_dir: Directory containing CadQuery code files
             filter_valid: Whether to filter samples with existing files
         """
-        self.data_path = data_path
+        self.data_path = _resolve_safe_data_path(data_path)
         self.mesh_dir = mesh_dir
         self.code_dir = code_dir
         
         # Load data
-        self.samples = load_pickle_data(data_path)
+        self.samples = load_dataset_data(self.data_path)
         
         # Filter if requested
         if filter_valid:
@@ -185,8 +244,8 @@ class Text2CADDataset:
 
 
 # Default paths (relative to CAD_Agent directory)
-DEFAULT_TEST_PATH = "./data/text2cad/test.pkl"
-DEFAULT_TRAIN_PATH = "./data/text2cad/train.pkl"
+DEFAULT_TEST_PATH = "./data/text2cad/test.json"
+DEFAULT_TRAIN_PATH = "./data/text2cad/train.json"
 DEFAULT_MESH_DIR = "./data/text2cad/deepcad_test_mesh"
 DEFAULT_CODE_DIR = "./data/text2cad/cadquery"
 
@@ -200,7 +259,7 @@ def load_test_dataset(
     Convenience function to load the test dataset with default paths.
     
     Args:
-        data_path: Path to test.pkl
+        data_path: Path to test dataset JSON
         mesh_dir: Directory with ground truth meshes
         code_dir: Directory with CadQuery code
         

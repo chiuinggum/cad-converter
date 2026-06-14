@@ -3,7 +3,6 @@ Batch processing script for generating LLM labels and evaluating CadQuery code.
 Processes samples in batches using async OpenAI API.
 """
 
-import pickle
 import random
 import os
 import sys
@@ -11,6 +10,7 @@ import json
 import traceback
 import asyncio
 import glob
+from pathlib import Path
 import numpy as np
 import trimesh
 import cadquery as cq
@@ -48,6 +48,31 @@ DEFAULT_BATCH_SIZE = 32
 DEFAULT_OUTPUT_DIR = 'sft/filtered_data'
 
 # Set OPENAI_API_KEY in your environment before running (e.g. export OPENAI_API_KEY=sk-...)
+
+
+def load_description_dataset(data_path: str):
+    """
+    Load description records from a JSON dataset.
+
+    Legacy `.pkl` paths are only accepted when a same-name `.json` file exists.
+    """
+    path = Path(data_path)
+    if path.suffix.lower() in {".pkl", ".pickle"}:
+        path = path.with_suffix(".json")
+
+    if not path.exists():
+        raise FileNotFoundError(f"dataset file not found: {path}")
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if isinstance(data, dict):
+        data = data.get("samples")
+
+    if not isinstance(data, list):
+        raise ValueError(f"dataset file {path} must contain a list of samples")
+
+    return data
 
 
 # =============================================================================
@@ -416,11 +441,17 @@ async def main_async(n_samples, batch_size, model, output_dir, seed=42, cd_thres
     print("Loading train/test/val data for original descriptions...")
     uid_to_description = {}
     for pkl_path in [TRAIN_DATA_PATH, TEST_DATA_PATH, VAL_DATA_PATH]:
-        if os.path.exists(pkl_path):
-            with open(pkl_path, 'rb') as f:
-                data = pickle.load(f)
-            for s in data:
-                uid_to_description[s['uid']] = s.get('description', '')
+        try:
+            data = load_description_dataset(pkl_path)
+        except FileNotFoundError as exc:
+            print(f"  Skipping {pkl_path}: {exc}")
+            continue
+        except ValueError as exc:
+            print(f"  Skipping {pkl_path}: {exc}")
+            continue
+
+        for s in data:
+            uid_to_description[s['uid']] = s.get('description', '')
     print(f"Loaded descriptions for {len(uid_to_description)} UIDs")
     
     # Find UIDs that have both GT code and mesh files
