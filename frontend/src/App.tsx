@@ -1406,7 +1406,7 @@ export default function App() {
                   </div>
                 </div>
 
-                {pipelineMethod === "v4" && (
+                {(pipelineMethod === "v4" || pipelineMethod === "v5") && (
                   <div className="space-y-3 p-3.5 bg-orange-50/60 border border-orange-100 rounded-lg">
                     <p className="text-[10px] font-bold font-mono uppercase tracking-wider text-orange-700">
                       V4 Visual Validation Settings

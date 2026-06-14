@@ -1,10 +1,10 @@
-export type PipelineMethod = "v1" | "v2" | "v3" | "v4";
+export type PipelineMethod = "v1" | "v2" | "v3" | "v4" | "v5";
 
 const STORAGE_KEY = "wondercad_pipeline_method";
 const STORAGE_SCHEMA_KEY = "wondercad_pipeline_method_schema";
 const STORAGE_SCHEMA_VERSION = "v1-v2-swapped";
 
-export const PIPELINE_METHOD_ORDER: PipelineMethod[] = ["v1", "v2", "v3", "v4"];
+export const PIPELINE_METHOD_ORDER: PipelineMethod[] = ["v1", "v2", "v3", "v4", "v5"];
 
 export const PIPELINE_METHOD_LABELS: Record<
   PipelineMethod,
@@ -29,6 +29,11 @@ export const PIPELINE_METHOD_LABELS: Record<
     title: "Method V4 — Visual validation loop",
     description:
       "V3 plus view-type detection (no crop), render matched multi-view composite from the 3D model, and Gemini compares the full drawing with renders in chat.",
+  },
+  v5: {
+    title: "Method V5 — Pioneer dual-model validation (spec-to-cq)",
+    description:
+      "V4 plus Pioneer fine-tuned spec-to-CQ model generating alternative code in step 2. Uses spec-alignment score to cross-validate and select the best candidate.",
   },
 };
 
@@ -60,6 +65,7 @@ export function loadPipelineMethod(): PipelineMethod {
     if (raw === "v2") return "v2";
     if (raw === "v3") return "v3";
     if (raw === "v4") return "v4";
+    if (raw === "v5") return "v5";
     return "v1";
   } catch {
     return "v1";
@@ -75,18 +81,18 @@ export function pipelineStepsForMethod(
   hasImage: boolean
 ): string[] {
   const steps: string[] = [];
-  if (hasImage && method === "v4") {
+  if (hasImage && (method === "v4" || method === "v5")) {
     steps.push("View Decouple");
   }
   if (hasImage && method !== "v1") {
     steps.push("Drawing Spec Extract");
   }
   steps.push("CadQuery Generation");
-  if (hasImage && (method === "v3" || method === "v4")) {
+  if (hasImage && (method === "v3" || method === "v4" || method === "v5")) {
     steps.push("Spec Validation");
   }
   steps.push("Execute & Export");
-  if (hasImage && method === "v4") {
+  if (hasImage && (method === "v4" || method === "v5")) {
     steps.push("Visual Validation");
   }
   return steps;

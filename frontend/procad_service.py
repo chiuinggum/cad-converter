@@ -56,12 +56,16 @@ os.chdir(str(PROCAD_ROOT))
 sys.path.insert(0, str(PROCAD_ROOT))
 if DRAWING_AGENT_SRC.is_dir():
     sys.path.insert(0, str(DRAWING_AGENT_SRC))
+sys.path.insert(0, str(FRONTEND_ROOT))
 
 from dotenv import load_dotenv
 
 load_dotenv(WONDERCAD_ROOT / ".env")
 load_dotenv(PROCAD_ROOT / ".env")
 load_dotenv(FRONTEND_ROOT / ".env")
+
+import pioneer_client
+import cross_validation
 
 from config.code_generation import (
     CODE_GENERATION_SYSTEM_PROMPT,
@@ -79,6 +83,18 @@ MAX_DIM_REPAIR_ATTEMPTS = int(os.environ.get("MAX_DIM_REPAIR_ATTEMPTS", "3"))
 MAX_VISUAL_VALIDATION_ATTEMPTS = int(os.environ.get("MAX_VISUAL_VALIDATION_ATTEMPTS", "3"))
 MAX_VISUAL_EXEC_REPAIR_ATTEMPTS = int(os.environ.get("MAX_VISUAL_EXEC_REPAIR_ATTEMPTS", "5"))
 VISUAL_VALIDATION_MIN_SCORE = float(os.environ.get("VISUAL_VALIDATION_MIN_SCORE", "0.72"))
+
+PIONEER_CQ_MODEL = os.environ.get(
+    "PIONEER_CQ_MODEL", "453a2746-afe4-44ef-a04e-80214522d5b3"
+)
+PIONEER_CQ_MODEL_LABEL = os.environ.get(
+    "PIONEER_CQ_MODEL_LABEL", "wondercad-spec-to-cq-qwen35-9b"
+)
+PIONEER_CQ_MAX_TOKENS = int(os.environ.get("PIONEER_CQ_MAX_TOKENS", "4096"))
+ASSISTANT_CODE_PREFILL = "import cadquery as cq\n\nresult = ("
+QWEN_DISABLE_THINKING = {
+    "chat_template_kwargs": {"enable_thinking": False},
+}
 
 DEFAULT_DRAWING_ONLY_PROMPT = (
     "Reconstruct the 3D CAD model from the reference engineering drawing. "
@@ -573,6 +589,95 @@ def format_drawing_spec_extra(drawing_spec: Optional[Dict[str, Any]]) -> str:
     return (
         f"Structured drawing spec available ({dim_n} dimensions, {feat_n} features)."
     )
+
+
+def spec_for_codegen_pioneer(drawing_spec: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(drawing_spec)
+    out.pop("ambiguities", None)
+    for key in ("views", "dimensions", "features", "relations"):
+        items = out.get(key) or []
+        slim: List[Dict[str, Any]] = []
+        for item in items:
+            it = dict(item)
+            it.pop("evidence", None)
+            it.pop("confidence", None)
+            it.pop("source_view_ids", None)
+            if key == "dimensions":
+                it.pop("limits", None)
+            slim.append(it)
+        out[key] = slim
+    out.pop("unsupported_or_unreadable_items", None)
+    return out
+
+
+def build_spec_to_cq_user_content(
+    drawing_spec: Dict[str, Any],
+    user_intro: str,
+) -> str:
+    sanitized = spec_for_codegen_pioneer(drawing_spec)
+    description = (
+        user_intro
+        + "\n\nSTRUCTURED DRAWING SPEC JSON:\n"
+        + json.dumps(sanitized, indent=2, ensure_ascii=False)
+    )
+    return CODE_GENERATION_USER_PROMPT_TEMPLATE.format(description=description)
+
+
+def _looks_like_cadquery(code: str) -> bool:
+    text = (code or "").lower()
+    return "import cadquery" in text or "cq.workplane" in text
+
+
+def _merge_assistant_prefill(prefill: str, raw: str) -> str:
+    text = (raw or "").strip()
+    extracted = pioneer_client.extract_cadquery_from_text(text)
+    if extracted and _looks_like_cadquery(extracted):
+        return extracted
+    if _looks_like_cadquery(text):
+        return text
+    # Model continued after the prefilled opening parenthesis.
+    continuation = text.lstrip("\n")
+    if continuation.startswith("import cadquery"):
+        return continuation
+    merged = prefill + continuation
+    extracted = pioneer_client.extract_cadquery_from_text(merged)
+    return extracted or merged
+
+
+def generate_code_pioneer_spec_to_cq(
+    prompt: str,
+    drawing_spec: Optional[Dict[str, Any]],
+) -> str:
+    if not drawing_spec:
+        raise RuntimeError(
+            "V5 requires a structured DrawingSpec from stage 1 (Drawing Spec Extract)."
+        )
+
+    if not pioneer_client.pioneer_configured():
+        raise RuntimeError("PIONEER_API_KEY is not configured")
+
+    user_intro = (prompt or "").strip() or "Build the 3D part described by the structured drawing specification below."
+    user_content = build_spec_to_cq_user_content(drawing_spec, user_intro)
+    messages: List[Dict[str, str]] = [
+        {"role": "system", "content": CODE_GENERATION_SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+        {"role": "assistant", "content": ASSISTANT_CODE_PREFILL},
+    ]
+
+    raw, meta = pioneer_client.pioneer_chat_with_meta(
+        messages,
+        model=PIONEER_CQ_MODEL,
+        temperature=0,
+        max_tokens=PIONEER_CQ_MAX_TOKENS,
+        extra=QWEN_DISABLE_THINKING,
+    )
+    code = _merge_assistant_prefill(ASSISTANT_CODE_PREFILL, raw)
+    if not _looks_like_cadquery(code):
+        finish = meta.get("finish_reason", "?")
+        raise RuntimeError(
+            f"Pioneer fine-tuned model returned no CadQuery code (finish={finish})."
+        )
+    return code
 
 
 def generate_code(description: str, llm: LLM) -> str:
@@ -1381,15 +1486,15 @@ def session_file_url(session_id: str, filename: str) -> str:
 
 def build_pipeline_steps(pipeline_method: str, has_image: bool) -> List[str]:
     steps: List[str] = []
-    if has_image and pipeline_method == "v4":
+    if has_image and pipeline_method in ("v4", "v5"):
         steps.append("View Decouple")
     if has_image and pipeline_method != "v1":
         steps.append("Drawing Spec Extract")
     steps.append("CadQuery Generation")
-    if has_image and pipeline_method in ("v3", "v4"):
+    if has_image and pipeline_method in ("v3", "v4", "v5"):
         steps.append("Spec Validation")
     steps.append("Execute & Export")
-    if has_image and pipeline_method == "v4":
+    if has_image and pipeline_method in ("v4", "v5"):
         steps.append("Visual Validation")
     return steps
 
@@ -1878,9 +1983,9 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
     view_decouple: Optional[Dict[str, Any]] = None
     pipeline_method = (data.get("pipelineMethod") or "v1").strip().lower()
     use_spec_extract = has_image and pipeline_method != "v1"
-    use_spec_validation = pipeline_method in ("v3", "v4") and use_spec_extract
-    use_view_decouple = has_image and pipeline_method == "v4"
-    use_visual_validation = has_image and pipeline_method == "v4"
+    use_spec_validation = pipeline_method in ("v3", "v4", "v5") and use_spec_extract
+    use_view_decouple = has_image and pipeline_method in ("v4", "v5")
+    use_visual_validation = has_image and pipeline_method in ("v4", "v5")
 
     pipeline_steps = build_pipeline_steps(pipeline_method, has_image)
     step_spec = pipeline_step_index(pipeline_steps, "Drawing Spec Extract") if use_spec_extract else None
@@ -1903,7 +2008,9 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
     )
     codegen_description = append_drawing_spec_context(prompt, drawing_spec)
 
-    if pipeline_method == "v4":
+    if pipeline_method == "v5":
+        method_label = "V5 (Pioneer dual-model spec-to-cq)"
+    elif pipeline_method == "v4":
         method_label = "V4 (view decouple + spec + visual validation)"
     elif pipeline_method == "v3":
         method_label = "V3 (spec + codegen + spec validation)"
@@ -1958,32 +2065,100 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
         if drawing_spec:
             codegen_description = append_drawing_spec_context(prompt, drawing_spec)
 
+    coder_inputs = ["prompt"]
+    if drawing_spec:
+        coder_inputs.append("drawing spec")
+    if has_image:
+        coder_inputs.append("image")
+    coder_inputs_str = " + ".join(coder_inputs)
+
     _pipeline_emit(
         emit,
         {
             "type": "step_start",
             "step": step_coder,
             "stepName": "CadQuery Generation",
-            "message": f"Generating CadQuery with {CODE_MODEL} (prompt + drawing spec + image)…",
+            "message": f"Generating CadQuery with {CODE_MODEL} ({coder_inputs_str})…",
         },
     )
     try:
-        code = generate_code_from_request(
-            prompt,
-            code_llm,
-            drawing_spec,
-            data.get("image"),
-            data.get("imageType"),
-        )
+        if pipeline_method == "v5":
+            code_gemini = generate_code_from_request(
+                prompt,
+                code_llm,
+                drawing_spec,
+                data.get("image"),
+                data.get("imageType"),
+            )
+            code_pioneer = ""
+            pioneer_error = ""
+            pioneer_syntax_ok = False
+            if pioneer_client.pioneer_configured():
+                try:
+                    code_pioneer = generate_code_pioneer_spec_to_cq(prompt, drawing_spec)
+                    try:
+                        validate_cadquery_syntax(code_pioneer)
+                        pioneer_syntax_ok = True
+                    except Exception as se:
+                        pioneer_error = f"Pioneer code syntax error: {se}"
+                except Exception as e:
+                    pioneer_error = f"Pioneer generation error: {e}"
+            else:
+                pioneer_error = "Pioneer API key not configured"
+
+            if drawing_spec and pioneer_syntax_ok:
+                score_gemini = cross_validation.score_code_against_spec(code_gemini, drawing_spec)
+                score_pioneer = cross_validation.score_code_against_spec(code_pioneer, drawing_spec)
+                margin = 0.05
+                if score_pioneer > score_gemini + margin:
+                    code = code_pioneer
+                    selected_model = f"Pioneer SFT ({PIONEER_CQ_MODEL_LABEL})"
+                    reason = f"Pioneer score {score_pioneer:.2f} > Gemini score {score_gemini:.2f} (margin > {margin})"
+                else:
+                    code = code_gemini
+                    selected_model = f"Gemini ({CODE_MODEL})"
+                    reason = f"Gemini preferred (Gemini score {score_gemini:.2f} vs Pioneer score {score_pioneer:.2f}, margin <= {margin})"
+            else:
+                code = code_gemini
+                selected_model = f"Gemini ({CODE_MODEL}) [Fallback]"
+                reason = f"Pioneer unavailable or syntax invalid: {pioneer_error}" if pioneer_error else "Drawing spec missing"
+
+            log_message = (
+                f"[V5 Coder] Model Selection: {selected_model}\n"
+                f"[V5 Coder] Selection Reason: {reason}\n"
+                f"[V5 Coder] Gemini Generated {len(code_gemini)} chars.\n"
+            )
+            if code_pioneer:
+                log_message += f"[V5 Coder] Pioneer Generated {len(code_pioneer)} chars.\n"
+            if pioneer_error:
+                log_message += f"[V5 Coder] Pioneer status: {pioneer_error}\n"
+            log_message += (
+                f"[Coder] Prompt + spec context: {len(codegen_description)} chars.\n"
+                f"[Coder] Reference image: {'yes' if has_image else 'no'}\n"
+                f"[Coder] Final Chosen Code Length: {len(code)} chars.\n[Coder] Preview:\n"
+                f"{code[:500]}{'…' if len(code) > 500 else ''}"
+            )
+        else:
+            code = generate_code_from_request(
+                prompt,
+                code_llm,
+                drawing_spec,
+                data.get("image"),
+                data.get("imageType"),
+            )
+            log_message = (
+                f"[Coder] Model: {CODE_MODEL}\n"
+                f"[Coder] Prompt + spec context: {len(codegen_description)} chars.\n"
+                f"[Coder] Reference image: {'yes' if has_image else 'no'}\n"
+                f"[Coder] Generated {len(code)} chars.\n[Coder] Preview:\n"
+                f"{code[:500]}{'…' if len(code) > 500 else ''}"
+            )
+
         iter_coder = make_iteration(
             step_coder,
             "CadQuery Generation",
             "success",
-            f"[Coder] Model: {CODE_MODEL}\n"
-            f"[Coder] Prompt + spec context: {len(codegen_description)} chars.\n"
-            f"[Coder] Reference image: {'yes' if has_image else 'no'}\n"
-            f"[Coder] Generated {len(code)} chars.\n[Coder] Preview:\n"
-            f"{code[:500]}{'…' if len(code) > 500 else ''}",
+            log_message,
             code,
         )
         iterations.append(iter_coder)
@@ -1996,7 +2171,15 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
                 "message": f"CadQuery code generated ({len(code)} characters).",
             },
         )
-        export_and_emit_preview(
+        
+        # Ensure syntax is valid first to maximize chance of rendering the 3D model
+        try:
+            code = ensure_valid_cadquery_code(code, code_llm, error_context="Initial generated code has syntax errors.")
+        except Exception:
+            pass
+
+        import time
+        exported = export_and_emit_preview(
             code,
             out_dir,
             session_id,
@@ -2005,6 +2188,8 @@ def run_generate(data: Dict[str, Any], emit: EmitFn = None) -> Dict[str, Any]:
             "preview_codegen",
             emit,
         )
+        if exported:
+            time.sleep(2.0)
         if use_spec_validation and drawing_spec and step_validation is not None:
             code, exec_error = validate_specs_and_repair_code(
                 code,
