@@ -19,36 +19,83 @@ function adaptiveRange(value: number) {
   return { min, max, step };
 }
 
+// A numeric literal: optional sign, integer/decimal. Shared by every rule so a
+// negative value (e.g. extrude(-5)) is captured everywhere, not just on extrude.
+const NUM = "-?\\d+(?:\\.\\d+)?";
+
+type ExtraGroup = { group: number; suffix: string };
+
 type Rule = {
   regex: RegExp;
   label: (match: RegExpExecArray, index: number) => string;
   valueGroup: number;
+  // Additional numeric args from the same match exposed as their own params
+  // (e.g. box width/height, cylinder radius).
+  extra?: ExtraGroup[];
 };
 
 const RULES: Rule[] = [
+  // Top-of-line variable assignments to a bare number, e.g. `radius = 5.5`.
+  // This is the most common reason params went missing: the model often factors
+  // dimensions into named constants instead of inlining literals into the calls.
+  // The `$` (with /m) requires the whole RHS to be just a number, so expressions
+  // like `r = d / 2` and statements like `result = cq.Workplane()` are skipped.
   {
-    regex: /\.circle\s*\(\s*([\d.]+)/g,
+    regex: new RegExp(`^[ \\t]*([A-Za-z_]\\w*)\\s*=\\s*(${NUM})\\s*(?:#.*)?$`, "gm"),
+    label: (m) => m[1],
+    valueGroup: 2,
+  },
+  {
+    regex: new RegExp(`\\.circle\\s*\\(\\s*(${NUM})`, "g"),
     label: (_, i) => `Circle radius #${i + 1}`,
     valueGroup: 1,
   },
   {
-    regex: /\.extrude\s*\(\s*(-?[\d.]+)/g,
+    regex: new RegExp(`\\.extrude\\s*\\(\\s*(${NUM})`, "g"),
     label: (_, i) => `Extrude #${i + 1}`,
     valueGroup: 1,
   },
   {
-    regex: /\.hole\s*\(\s*([\d.]+)/g,
+    regex: new RegExp(`\\.hole\\s*\\(\\s*(${NUM})`, "g"),
     label: (_, i) => `Hole #${i + 1}`,
     valueGroup: 1,
   },
   {
-    regex: /\.rect\s*\(\s*([\d.]+)\s*,\s*([\d.]+)/g,
+    regex: new RegExp(`\\.(?:cbore|csk)Hole\\s*\\(\\s*(${NUM})`, "g"),
+    label: (_, i) => `Counter-hole #${i + 1}`,
+    valueGroup: 1,
+  },
+  {
+    regex: new RegExp(`\\.rect\\s*\\(\\s*(${NUM})\\s*,\\s*(${NUM})`, "g"),
     label: (m, i) => `Rect ${m[1]}×${m[2]} #${i + 1}`,
     valueGroup: 1,
   },
   {
-    regex: /\.box\s*\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/g,
-    label: (m, i) => `Box L×W×H #${i + 1}`,
+    regex: new RegExp(`\\.box\\s*\\(\\s*(${NUM})\\s*,\\s*(${NUM})\\s*,\\s*(${NUM})`, "g"),
+    label: (_, i) => `Box L #${i + 1}`,
+    valueGroup: 1,
+    extra: [
+      { group: 2, suffix: "W" },
+      { group: 3, suffix: "H" },
+    ],
+  },
+  // CadQuery solid primitive: cylinder(height, radius).
+  {
+    regex: new RegExp(`\\.cylinder\\s*\\(\\s*(${NUM})\\s*,\\s*(${NUM})`, "g"),
+    label: (_, i) => `Cylinder height #${i + 1}`,
+    valueGroup: 1,
+    extra: [{ group: 2, suffix: "radius" }],
+  },
+  {
+    regex: new RegExp(`\\.sphere\\s*\\(\\s*(${NUM})`, "g"),
+    label: (_, i) => `Sphere radius #${i + 1}`,
+    valueGroup: 1,
+  },
+  // polygon(nSides, diameter): nSides is an integer count, not a dimension, so
+  // only the diameter (group 2) is exposed as an editable param.
+  {
+    regex: new RegExp(`\\.polygon\\s*\\(\\s*${NUM}\\s*,\\s*(${NUM})`, "g"),
+    label: (_, i) => `Polygon diameter #${i + 1}`,
     valueGroup: 1,
   },
 ];
@@ -56,63 +103,52 @@ const RULES: Rule[] = [
 export function extractCadParams(code: string): CadParam[] {
   if (!code?.trim()) return [];
   const params: CadParam[] = [];
+  const seen = new Set<number>(); // dedupe by literal position in the source
   let globalIdx = 0;
 
+  const push = (raw: string, label: string, start: number, end: number) => {
+    const value = parseFloat(raw);
+    if (!Number.isFinite(value)) return;
+    if (seen.has(start)) return;
+    seen.add(start);
+    const { min, max, step } = adaptiveRange(value);
+    params.push({
+      id: `param_${globalIdx}`,
+      label,
+      value,
+      min,
+      max,
+      step,
+      unit: "mm",
+      start,
+      end,
+    });
+    globalIdx += 1;
+  };
+
   for (const rule of RULES) {
-    const re = new RegExp(rule.regex.source, rule.regex.flags);
+    // `d` flag → match.indices gives exact [start, end] of each capture group,
+    // so we never mis-locate a number that also appears inside an identifier.
+    const re = new RegExp(rule.regex.source, rule.regex.flags + "d");
     let match: RegExpExecArray | null;
     let localIdx = 0;
     while ((match = re.exec(code)) !== null) {
-      const raw = match[rule.valueGroup];
-      const value = parseFloat(raw);
-      if (!Number.isFinite(value)) continue;
+      const indices = (match as RegExpExecArray & { indices?: Array<[number, number] | undefined> }).indices;
+      const primary = indices?.[rule.valueGroup];
+      if (!primary) continue;
+      push(match[rule.valueGroup], rule.label(match, localIdx), primary[0], primary[1]);
 
-      const start = match.index + match[0].indexOf(raw);
-      const end = start + raw.length;
-      const { min, max, step } = adaptiveRange(value);
-
-      params.push({
-        id: `param_${globalIdx}`,
-        label: rule.label(match, localIdx),
-        value,
-        min,
-        max,
-        step,
-        unit: "mm",
-        start,
-        end,
-      });
-      globalIdx += 1;
-      localIdx += 1;
-
-      // box: also expose W and H as separate params when present
-      if (rule.regex.source.includes("box") && match[2] && match[3]) {
-        for (const [g, suffix] of [
-          [2, "W"],
-          [3, "H"],
-        ] as const) {
-          const v = parseFloat(match[g]);
-          if (!Number.isFinite(v)) continue;
-          const s = match.index + match[0].indexOf(match[g]);
-          const e = s + match[g].length;
-          const range = adaptiveRange(v);
-          params.push({
-            id: `param_${globalIdx}`,
-            label: `Box ${suffix} #${localIdx}`,
-            value: v,
-            min: range.min,
-            max: range.max,
-            step: range.step,
-            unit: "mm",
-            start: s,
-            end: e,
-          });
-          globalIdx += 1;
-        }
+      for (const ex of rule.extra ?? []) {
+        const span = indices?.[ex.group];
+        if (!span || match[ex.group] == null) continue;
+        push(match[ex.group], `${rule.label(match, localIdx)} (${ex.suffix})`, span[0], span[1]);
       }
+      localIdx += 1;
     }
   }
 
+  // Keep source order so sliders track the code top-to-bottom.
+  params.sort((a, b) => a.start - b.start);
   return params.slice(0, 24);
 }
 

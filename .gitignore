@@ -2,7 +2,9 @@
 .venv/
 
 outputs/
-data/
+# Anchor to repo root so this only ignores the top-level data dir, not source
+# folders like frontend/src/data/ (which holds committed code, e.g. examples.ts).
+/data/
 
 .pytest_cache/
 .ruff_cache/
